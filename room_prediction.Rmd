@@ -1,0 +1,3412 @@
+---
+title: "missing value"
+author: "Tian He"
+date: "August 2, 2018"
+output: html_document
+---
+
+- Since children hospital's system doesn't record how many rooms are actually used, we designed an algorithm to caculate used rooms for each session. This algorithm has been proven to be accurate but it requires the time when patients enter and leave the room. From all of the data we get, only two of the departments in CHP have nearly complete data about the entering and leaving time. That's the reason why we build our predictive model based on nuerology data set.
+
+- The purpose of this part is to find out how to deal with missing values related to rooming and departuring time. The method is as follows: First, defining the types of missing values and figuring the propotion of different types. Second, scaling up the quantities of missing values by the propotion to a certain extent. Third, inputing missing values using different methods, such as conditional imputation and machine learning imputation. Forth, using designed algorithm and imputed data set to get how many rooms were used and caculating RMSE comparing to the reality. Fifth, using imputed room to train predictive model, finding out rmse for model itself and rmse for predicted results and reality. Sixth, analysing results of the forth and fifth steps, drowing up the best way to deal missing values and figuring out the scope of missing values proposion under which we can get accurate predited results.
+
+# 1. Load dataset
+- load "Neurology FY17.xlsx"
+
+```{r loaddata, message=TRUE, warning=FALSE}
+datadirectory<-"C:/TEXTBOOK/CHP/REPOSITORY_Ambulatory/pitt-chp-ambulatory/Missing Value(Neurology)"
+
+#datadirectory <- "E:\\Box Sync\\Ambulatory\\Neurology\\Data from CHP\\Cadence Data"
+datafile<-"Neurology FY17.xlsx"
+#datafile_1 <- 
+#datafile<-"Neurology FY17.xlsx"
+```
+
+# 2. Data preparation
+
+- In this section, we will choose the data related to our prediction and give them proper attributes
+
+```{r message=FALSE, echo=FALSE}
+# load libraries
+library(readxl)
+library(knitr)
+library(lubridate)
+library(magrittr)
+```
+
+```{r message = FALSE, warning = FALSE}
+fydat <- read_excel(file.path(datadirectory, datafile),
+                    col_types = c("text", "text", "blank",
+                                           "date", "text", "numeric", "text",
+                                           "text", "text", "text", "blank", "blank", "text", "blank",
+                                           "blank", "numeric", "blank", "blank",
+                                           "numeric", "blank", "blank", "blank",
+                                           "blank", "blank", "blank", "blank",
+                                           "text", "text", "text", "blank",
+                                           "blank", "blank", "text", "blank",
+                                           "text", "date", "text", "blank",
+                                           "blank", "blank", "blank", "text",
+                                           "text", "text", "text", "text", "blank",
+                                           "blank", "blank", "blank", "blank",
+                                           "date", "text", "text", "blank",
+                                           "blank", "blank", "blank", "blank",
+                                           "blank", "date", "date"))
+```
+
+
+```{r}
+# set parameters
+# declare check in to rooming time
+checkInDelay <- 21
+secInMin <- 60
+maxApptLength <- 240
+minApptLength <- 0
+# declare minimum observances for appointment lengths
+minN <- 50
+```
+
+# 3. Determining Staffed Rooms
+
+## 3.1 select useful data
+- chose data which `Appt Status` is Completed, Arrived or Unresolved; `Appt Type` is SERVICE, RESEARCH or PHONE APPT.
+- order data, from earliest to latest, by appointment date, then by session within that day (AM/PM), then by time that the patient enters the room (rooming form) within that session
+
+```{r}
+dat <- fydat[fydat$Department == "1034117 - UPA NEURO CHP OP" &
+               (fydat$`Appt Status` == "Completed" | 
+                  fydat$`Appt Status`=="Arrived" | 
+                  fydat$`Appt Status`=="Unresolved") &
+               (fydat$`Appt Type`!="4670 - SERVICE" & 
+                  fydat$`Appt Type`!="4879 - RESEARCH" & 
+                  fydat$`Appt Type`!="5894 - PHONE APPT"),]
+
+tz(dat$`Rooming Form`) <- "America/New_York"
+tz(dat$`Depart Summary`) <- "America/New_York"
+```
+
+
+## 3.2 Define types of missing values.
+
+### 3.2.1 Classifications
+
+
+- Case 1: Rooming Form is present, Depart Summary is present
+* Note: always a check in time
+```{r echo = FALSE}
+nrow(dat[!is.na(dat$`Rooming Form`) & !is.na(dat$`Depart Summary`),])/nrow(dat)
+```
+- Case 2: Rooming Form is not present, Depart Summary is present
+```{r echo = FALSE}
+nrow(dat[is.na(dat$`Rooming Form`) & !is.na(dat$`Depart Summary`),])/nrow(dat)
+```
+- Case 3: Rooming Form is present, Depart Summary is not present
+
+```{r echo = FALSE}
+nrow(dat[!is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+```
+
+- Case 4: Rooming Form is not present, Depart Summary is not present
+* Note: sometimes check in form is present, sometimes check in form is not present
+```{r echo = FALSE}
+nrow(dat[is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+```
+- Case 4.1: Rooming Form is not present, Depart Summary is not present, Check In Time is present
+- Case 4.2: ROoming Form is not present, Depart Summary is not present, Check In Time is not present
+
+- Find out how many case 4 are in case 4.1
+```{r echo = FALSE}
+nrow(dat[is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`) & !is.na(dat$`Check In Time`),])/nrow(dat)
+```
+
+- Find out how many case 4 are in case 4.2
+```{r echo = FALSE}
+nrow(dat[is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`) & is.na(dat$`Check In Time`),])/nrow(dat)
+```
+
+- Make sure all types sum up tp 1
+```{r echo = FALSE}
+case <- round(c(0.90505, 0, 0.03583896, 0.05911101, 0.05818013, 0.000930882), digits = 3)
+names(case) <- c("case1", "case2", "case3", "case4", "case4.1", "case4.2")
+case
+sum(case[1:4])
+
+```
+
+###3.2.2 Conculusion
+
+- there are mainly two types of missing values in Neurology dataset.
+
+- the first is case 3 where Rooming Form is present, Depart Summary is not present. The ratio of this case is 0.0358.
+
+- the second is case 4.1 where Rooming Form is not present, Depart Summary is not present, but Check In Time is present. The ratio of this case is 0.05818013.
+
+## 3.3 Create a complete dataset
+
+- For analysing purpose, we use the methods below to create a complete dataset.
+
+***Dealing with Cases:***
+
+Case 1: Start of Appointment = Rooming Form, End of Appointment = Depart Summary\
+Case 2: Never encountered\
+Case 3: Start of Appointment = Rooming Form, End of Appointment = Rooming Form + average appointment length for the given patient's intended appointment length\
+Case 4.1: Start of Appointment = Check In Time + 30 minutes, End of Appointment = calculated start of appointment + average appointment length + 10*60 for the given patient's intended appointment length\
+Case 4.2: Classify patient as a no show and exclude from further analysis
+### should we impute the depart summary which has an abnormal los?
+- This section deals with case 4.1 and case 4.2
+```{r}
+# declare start of appointment
+dat$startOfAppt <- dat$`Rooming Form`
+
+# format check in time to match rooming form
+dat$`Check In Time` <- sub("([0-9])([A-Z])", "\\1 \\2", dat$`Check In Time`)
+dat$`Check In Time` <- as.POSIXct(dat$`Check In Time`, format = "%m/%d/%Y %I:%M %p")
+# format check out time to match rooming form
+dat$`Check Out Time` <- sub("([0-9])([A-Z])", "\\1 \\2", dat$`Check Out Time`)
+dat$`Check Out Time` <- as.POSIXct(dat$`Check Out Time`, format = "%m/%d/%Y %I:%M %p")
+
+# (Case 4.2) get rid of patients without check in
+dat<- dat[!is.na(dat$`Check In Time`),]
+#dat <- dat[!is.na(dat$`Check In Time`)|!is.na(dat$`Rooming Form`)|!is.na(dat$`Depart Summary`),] CHANGE1
+## Strange thing happens here. There's still 1 NA in `Check In Time`. dat<- dat[!is.na(dat$`Check In Time`),] work well here.
+##nrow(dat[is.na(dat$`Check In Time`),]) = 9, there is 1 column do not have checkin time but have rooming and depart time, since there is only 1 column, i decide to delete it. Or we can impute it.
+sum(is.na(dat$`Check In Time`))##???
+# (case 4.1) use check in time + delay when rooming form not available
+for (i in 1:nrow(dat)) {
+  if(is.na(dat$startOfAppt[i])) {
+    dat$startOfAppt[i] <- dat$`Check In Time`[i] + checkInDelay*secInMin
+  }
+}
+# make sure no NA in startOfAppt
+sum(is.na(dat$startOfAppt))
+```
+
+- This section deals with case 3.
+```{r, warning=FALSE}
+library(dplyr)
+# declare end of appointment
+dat$endOfAppt <- dat$`Depart Summary`
+
+# find average time in room for different appointment lengths
+# calculate length of stay and only use valid lengths
+dat$LOS <- as.numeric(difftime(dat$endOfAppt, dat$startOfAppt, units = "mins"))
+nrow(dat[dat$LOS<minApptLength | dat$LOS > maxApptLength |
+             is.na(dat$LOS),])
+dat <- dat[(dat$LOS>minApptLength & dat$LOS<maxApptLength)|is.na(dat$LOS),]
+nrow(dat[dat$LOS<minApptLength | dat$LOS > maxApptLength|
+             is.na(dat$LOS),])
+nrow(dat[is.na(dat$LOS),])
+
+# find averages for each appointment length
+losAvg <- dat %>% group_by(`Appt Length`) %>%
+            summarise(Mean=round(mean(LOS, na.rm = TRUE)),
+                      Stdev=round(sd(LOS, na.rm = TRUE)),
+                     n=n_distinct(`Check In Time`))
+losAvg <- losAvg[losAvg$n>=minN & !is.na(losAvg$`Appt Length`),]
+
+# (case 3): use start of appointment + estimated time in room when depart summary not available
+for (i in 1:nrow(dat)) {
+  if (is.na(dat$endOfAppt[i])&
+      !is.na(dat$startOfAppt[i])) {
+    for (j in 1:nrow(losAvg)) {
+      if (dat$`Appt Length`[i] == losAvg$`Appt Length`[j]) {
+        dat$LOS[i] <- losAvg$Mean[j]
+      }
+    }
+    dat$endOfAppt[i] <- dat$startOfAppt[i] + dat$LOS[i]*secInMin
+  }
+}
+nrow(dat[dat$LOS<minApptLength | dat$LOS > maxApptLength,])
+dat[dat$LOS<minApptLength | dat$LOS > maxApptLength,]$LOS
+# there're still 9 NA in dat, that's because of their ApptLength is abnormal. n < minN
+# add allowance for end of appointment
+dat$endOfAppt<- dat$endOfAppt + 10*60
+sum(is.na(dat$startOfAppt))
+sum(is.na(dat$endOfAppt))
+```
+
+* Add 10 minutes to the depart summary to account for the patient actually leaving the room and the turnaround time before the next patient can enter
+- Recall that the depart summary is typically 4.4 minutes before the actual patient room departure
+    
+- Reclassify morning patients as afternoon if entered room after 12:00PM
+- reclassify afternoon patients as morning if entered exam room before 12:00 PM
+
+```{r}
+for (i in 1:nrow(dat))
+{
+  if(hour(dat$startOfAppt[i])>=12)
+  {dat$`Morning/Afternoon`[i] <- "PM - AFTERNOON"}
+  else if (hour(dat$startOfAppt[i])<12)
+  {dat$`Morning/Afternoon`[i] <- "AM - MORNING"}
+}
+# find out patients when they room in at morning and leaving at noon
+nrow(dat[dat$`Morning/Afternoon` == "AM - MORNING" & format(dat$`Depart Summary`, "%H")>12, ])
+```
+    
+    
+## 3.4 Caluate actually used rooms
+
+- 1. create a matrix (called "rooms") to store the number of rooms available when each new patient arrives
+    + each column will be a different session 
+    + each row will be a patient arriving during the column's session
+- 2. go through the cadence data row by row
+    a.  for each row, compare the patient's session to the session in the row above
+    b.  if the patient is in the same session as the patient in the row above, check the new patient's rooming form to all depart summaries for all patients in the same session in the rows above
+          i. count all of the depart summaries (in the same session) that occur after the new patient's rooming form. we can assume that the new patient is entering a room that is not occupied by any of the patients whose depart summaries occur after the new patient's rooming form
+          ii. record the number of rooms that are in use when the patient arrives in the "rooms" matrix
+    c. if the patient's session does not match the session of the patient in the row above, we assume that we have either moved on from morning to afternoon or afternoon to the next morning, so we start the room count over again
+          i. move to the next column in the "rooms" matrix
+          ii. repeat 2bi, 2bii 
+- 3. find the maximum in each column (session) of the "rooms" matrix
+
+```{r warning = FALSE, message = FALSE}
+dat <- dat[!is.na(dat$startOfAppt) & !is.na(dat$endOfAppt),]
+# order data chronologically
+dat <- dat[order(dat$`Appt Date`, dat$`Morning/Afternoon`, dat$startOfAppt),]
+#rownames(dat) <- 1:nrow(dat)
+dat$Session <- paste(dat$`Appt Date`, dat$`Morning/Afternoon`)
+library(plyr)
+library(knitr)
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(count(dat$`Appt Date`)$freq), sum(count(unique(dat$Session))$freq))
+colnames(rooms) <- unique(dat$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(dat)){
+  if ((dat$`Appt Date`[z] == dat$`Appt Date`[z-1]) & 
+      (dat$`Morning/Afternoon`[z] == dat$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (dat$endOfAppt[k] > dat$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(dat)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (dat$`Appt Date`[z] != dat$`Appt Date`[z-1] |
+           dat$`Morning/Afternoon`[z] != dat$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+maxrooms.df$Number.Patients <- count(dat$Session)$freq
+##kable(maxrooms.df[,c(1:2)], format = "markdown")
+# prep data to be joined with rent grid
+maxrooms.df$Date <- gsub("\\ .*","",maxrooms.df$Session)
+maxrooms.df$Date <- as.POSIXct(maxrooms.df$Date, format = "%Y-%m-%d")
+
+maxrooms.df$`Morning/Afternoon` <- gsub(".* ", "", maxrooms.df$Session)
+maxrooms.df$`Day of Week` <- weekdays(maxrooms.df$Date, abbreviate = TRUE)
+maxrooms.df$Day.of.Month <- as.numeric(format(maxrooms.df$Date, "%d"))
+
+# add week number to staffed room data
+for (j in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$Day.of.Month[j]<=7) {
+    maxrooms.df$`Week Number`[j] <- 1
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=14) {
+    maxrooms.df$`Week Number`[j] <- 2
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=21) {
+    maxrooms.df$`Week Number`[j] <- 3
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=28) {
+    maxrooms.df$`Week Number`[j] <- 4
+  }
+  else {
+    maxrooms.df$`Week Number`[j] <- 5
+  }
+}
+
+# Time of day
+for (i in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$`Morning/Afternoon`[i] == "MORNING") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "AM"
+  }
+  else if (maxrooms.df$`Morning/Afternoon` [i] == "AFTERNOON") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "PM"
+  }
+}
+maxrooms.df$Staffed.Rooms <- maxrooms.df$maxrooms
+maxrooms.df$maxrooms <- NULL
+colnames(maxrooms.df)[colnames(maxrooms.df)=="Date"] <- "Appt Date"
+maxrooms.df$`Morning/Afternoon` <- ifelse(maxrooms.df$`Morning/Afternoon`=="AM", "AM - MORNING", "PM - AFTERNOON")
+
+write.csv(maxrooms.df, file = "staffedrooms(ori).csv", row.names = FALSE)
+detach(package:plyr)
+```
+
+
+- Since the way we caculated in "staffedrooms(ori).csv" works pretty well in later work, We can assume the maxrooms we got in  "staffedrooms(ori).csv" are actual maxrooms.
+
+
+### 3.4.1 This step is to convert the code we caculate maxroos into a function.
+
+```{r warning=FALSE, message=FALSE}
+Caculate_staff <- function(ArtificialData){
+library(plyr)
+library(knitr)
+ArtificialData <- ArtificialData[!is.na(ArtificialData$startOfAppt) & !is.na(ArtificialData$endOfAppt),]
+# order data chronologically
+ArtificialData <- ArtificialData[order(ArtificialData$`Appt Date`, ArtificialData$`Morning/Afternoon`, ArtificialData$startOfAppt),]
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(count(ArtificialData$`Appt Date`)$freq), sum(count(unique(ArtificialData$Session))$freq))
+colnames(rooms) <- unique(ArtificialData$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(ArtificialData)){
+  if ((ArtificialData$`Appt Date`[z] == ArtificialData$`Appt Date`[z-1]) & 
+      (ArtificialData$`Morning/Afternoon`[z] == ArtificialData$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (ArtificialData$endOfAppt[k] > ArtificialData$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(ArtificialData)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (ArtificialData$`Appt Date`[z] != ArtificialData$`Appt Date`[z-1] |
+           ArtificialData$`Morning/Afternoon`[z] != ArtificialData$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+maxrooms.df$Number.Patients <- count(ArtificialData$Session)$freq
+##kable(maxrooms.df[,c(1:2)], format = "markdown")
+
+# prep data to right format
+maxrooms.df$Date <- gsub("\\ .*","",maxrooms.df$Session)
+maxrooms.df$Date <- as.POSIXct(maxrooms.df$Date, format = "%Y-%m-%d")
+
+maxrooms.df$`Morning/Afternoon` <- gsub(".* ", "", maxrooms.df$Session)
+maxrooms.df$`Day of Week` <- weekdays(maxrooms.df$Date, abbreviate = TRUE)
+maxrooms.df$Day.of.Month <- as.numeric(format(maxrooms.df$Date, "%d"))
+
+# add week number to staffed room data
+for (j in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$Day.of.Month[j]<=7) {
+    maxrooms.df$`Week Number`[j] <- 1
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=14) {
+    maxrooms.df$`Week Number`[j] <- 2
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=21) {
+    maxrooms.df$`Week Number`[j] <- 3
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=28) {
+    maxrooms.df$`Week Number`[j] <- 4
+  }
+  else {
+    maxrooms.df$`Week Number`[j] <- 5
+  }
+}
+
+# Time of day
+for (i in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$`Morning/Afternoon`[i] == "MORNING") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "AM"
+  }
+  else if (maxrooms.df$`Morning/Afternoon` [i] == "AFTERNOON") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "PM"
+  }
+}
+maxrooms.df$Staffed.Rooms <- maxrooms.df$maxrooms
+maxrooms.df$maxrooms <- NULL
+colnames(maxrooms.df)[colnames(maxrooms.df)=="Date"] <- "Appt Date"
+maxrooms.df$`Morning/Afternoon` <- ifelse(maxrooms.df$`Morning/Afternoon`=="AM", "AM - MORNING", "PM - AFTERNOON")
+detach(package:plyr)
+##write.csv(maxrooms.df, file = "staffedrooms(ori).csv", row.names = FALSE)
+return(maxrooms.df)
+
+}
+```
+
+```{r}
+dat_or <- dat
+```
+
+
+## 4 Get the original prediction for used rooms.
+- This part is using the original data set to get a baseline for comparison.
+* put data into correct format
+* order data, from earliest to latest, by appointment date, then by session within that day (AM/PM), then by time that the patient enters the room (rooming form) within that session
+
+### 4.1 load Neurology FY17.xlsx
+```{r}
+maxApptLength <- 240
+fydat<-read_excel("Neurology FY17.xlsx")
+dat <- fydat[fydat$Department == "1034117 - UPA NEURO CHP OP" &
+               (fydat$`Appt Status` == "Completed" | fydat$`Appt Status` == "Canceled"|fydat$`Appt Status` == "No Show"|
+                  fydat$`Appt Status`=="Arrived" | 
+                  fydat$`Appt Status`=="Unresolved") &
+               (fydat$`Appt Type`!="4670 - SERVICE" & 
+                  fydat$`Appt Type`!="4879 - RESEARCH" & 
+                  fydat$`Appt Type`!="5894 - PHONE APPT"),]
+
+library(lubridate)
+table(dat$`Appt Status`)
+##nrow(dat[dat$`Appt Status` == "No Show" &is.na(dat$`Rooming Form`),])
+```
+
+### 4.2 deal with missing value
+* If rooming form is not present, patient is not included  ##(maybe we should include it? containing the informtion of on show?)
+* Depart Summary is replaced with Rooming Form + Scheduled Appointment Length if any of the following are true:
+    + Depart Summary is missing
+    + Depart Summary is earlier than Rooming Form for the appointment
+    + Difference between Depart Summary and Rooming Form for the appointment is greater than 4 hours
+        + Indicates a long appointment duration and thus a questionable Depart Summary(this part is what i want to do)
+
+* Add 10 minutes to the depart summary to account for the patient actually leaving the room and the turnaround time before the next patient can enter
+    + Recall that the depart summary is typically 4.4 minutes before the actual patient room departure
+
+- Estimating Rooming Form- If Rooming Form not present, use Check In Time + 30 minutes
+```{r}
+##sum(!is.na(dat$`Check In Time`) & is.na(dat$`Rooming Form`))
+# declare check in to rooming time
+checkInDelay <- 30
+secInMin <- 60
+#dat <- dat[!is.na(dat$`Check In Time`), ]
+# declare start of appointment
+dat$startOfAppt <- dat$`Rooming Form`
+
+# format check in time to match rooming form
+dat$`Check In Time` <- sub("([0-9])([A-Z])", "\\1 \\2", dat$`Check In Time`) 
+dat$`Check In Time` <- as.POSIXct(dat$`Check In Time`, format = "%m/%d/%Y %I:%M %p")
+
+# use check in time when rooming form not available
+for (i in 1:nrow(dat)) {
+  if(is.na(dat$startOfAppt[i])) {
+    dat$startOfAppt[i] <- dat$`Check In Time`[i] + checkInDelay*secInMin
+  }
+}
+```
+
+- Estimating Depart Summary- if not present, use rooming form + scheduled appointment length
+```{r}
+# declare max and min appointemnt lengths
+minApptLength <- 0
+maxApptLength <- 240
+
+# declare end of appointment
+dat$endOfAppt <- dat$`Depart Summary`
+
+# find average time in room for different appointment lengths
+# calculate length of stay and only use valid lengths
+dat$LOS <- as.numeric(difftime(dat$endOfAppt, dat$startOfAppt, units = "mins"))
+dat <- dat[(dat$LOS>minApptLength &
+             dat$LOS<maxApptLength)|
+             is.na(dat$LOS),]
+
+
+library(dplyr)
+# declare minimum observances for appointment lengths
+minN <- 50 #??what is the use of this line?
+
+# find averages for each appointment length
+losAvg <- dat %>% group_by(`Appt Length`) %>%
+  dplyr:: summarise(Mean=round(mean(LOS, na.rm = TRUE)),
+            Stdev=round(sd(LOS, na.rm = TRUE)),
+            n=n())
+losAvg <- losAvg[losAvg$n>=minN & !is.na(losAvg$`Appt Length`),]
+
+# use start of appointment + estimated time in room when depart summary is not available
+for (i in 1:nrow(dat)) {
+  if (is.na(dat$endOfAppt[i])&
+      !is.na(dat$startOfAppt[i])) {
+    for (j in 1:nrow(losAvg)) {
+      if (dat$`Appt Length`[i] == losAvg$`Appt Length`[j]) {
+        dat$LOS[i] <- losAvg$Mean[j]
+      }
+    }
+    dat$endOfAppt[i] <- dat$startOfAppt[i] + dat$LOS[i]*secInMin
+  }
+}
+
+# add allowance for end of appointment
+dat$endOfAppt<- dat$endOfAppt + 10*60
+
+losAvg
+```
+
+- In this section we investigate the frequency of occurrence of these scenarios.
+- Find the maximum in each column (session) of the "rooms" matrix
+- get information from appointment time
+```{r}
+dat$`Appt Time`<-format(strptime(dat$`Appt Time`, "%I:%M %p"), format="%H:%M:%S") ##????
+dat$New_time<-as.POSIXct(paste(dat$`Appt Date`, dat$`Appt Time`), format="%Y-%m-%d %H:%M")
+tz(dat$New_time)<-"America/New_York"
+#determine how early they will arrive based on data
+dat$Pre_arrival<-(dat$`Check In Time`-dat$New_time)/60
+dat$`Appt Type`<-as.factor(dat$`Appt Type`)
+l<-lapply(split(dat$Pre_arrival,dat$`Appt Type`),mean)
+#determine how late they will levae after the checking out
+dat$`Check Out Time`<-as.POSIXct(format(strptime(dat$`Check Out Time`,"%m/%d/%Y %I:%M %p"),format="%m/%d/%Y %H:%M"),format="%m/%d/%Y %H:%M")
+#tz(dat$`Check Out Time`)<-"America/New_York"
+#tz(dat$`Depart Summary`)<-"America/New_York"
+dat$post_leave<-(dat$endOfAppt-dat$`Depart Summary`)
+ll<-lapply(split(dat$post_leave,dat$`Appt Type`),mean,na.rm=TRUE)
+
+#arrival before appt
+#$`6 - NEW PATIENT`
+#Time difference of  10.78247mins
+
+#$`7 - RETURN PATIENT`
+#Time difference of 11.72817 mins
+#get when they will levae :avg 10 min
+
+dat<-dat[!is.na(dat$`Appt Length`),]
+for (i in 1:nrow(dat)){
+  ##if(is.na(dat$`Check In Time`)){}
+  if(dat$`Appt Length`[i]==60){dat$startOfAppt[i]=dat$New_time[i]-dminutes(11)
+  dat$endOfAppt[i]=dat$New_time[i]+dminutes(68)
+    
+  }else if(dat$`Appt Length`[i]==45){dat$startOfAppt[i]=dat$New_time[i]-dminutes(11)
+  dat$endOfAppt[i]=dat$New_time[i]+dminutes(75)
+    
+  }else if(dat$`Appt Length`[i]==40){dat$startOfAppt[i]=dat$New_time[i]-dminutes(11)
+  dat$endOfAppt[i]=dat$New_time[i]+dminutes(46)
+    
+  }else if(dat$`Appt Length`[i]==30){dat$startOfAppt[i]=dat$New_time[i]-dminutes(11)
+  dat$endOfAppt[i]=dat$New_time[i]+dminutes(56)
+    
+  }else if(dat$`Appt Length`[i]==20){dat$startOfAppt[i]=dat$New_time[i]-dminutes(11)
+  dat$endOfAppt[i]=dat$New_time[i]+dminutes(39)
+    
+  }
+    
+  }
+## Here has a big problem
+##dat$New_time[1]-dminutes(11) should be "2016-07-01 08:19:00 EDT" but dat$startOfAppt[1] is "2016-07-01 12:19:00 UTC"
+##tz(dat$startOfAppt)<-"America/New_York" do not work here
+```
+
+```{r}
+wrong <- dat[#(dat$`Morning/Afternoon` == "AM - MORNING" & format(dat$`Rooming Form`, "%H")>12) |
+               (dat$`Morning/Afternoon` == "AM - MORNING" & format(dat$`Depart Summary`, "%H")>12) |
+               (dat$`Morning/Afternoon` == "PM - AFTERNOON" & format(dat$`Depart Summary`, "%H")<12 & !is.na(dat$`Depart Summary`)),]
+
+# percentage of incorrect sessions
+paste(round((nrow(wrong)/nrow(dat))*100, 2), "%", sep = "")
+```
+
+```{r}
+# order data chronologically
+dat <- dat[order(dat$`Appt Date`, dat$`Morning/Afternoon`, dat$startOfAppt),]
+#rownames(dat) <- 1:nrow(dat)
+dat$Session <- paste(dat$`Appt Date`, dat$`Morning/Afternoon`)
+```
+
+### 4.3 Currently 7 for 7 day lookahead
+- Since we can know whether the appointment is cancelled several days before appointment date, we exlude these data before we use it to train predictive model.
+```{r}
+time_window_Data2<-data.frame()
+#creat 7 days lookaehad
+for (i in 1:nrow(dat)){
+  
+  if (dat$`Appt Date`[i]-dat$`Made On Date`[i]>=7){  #parametrize here for scheduled rooms. Currently 7 days
+    #colnames(time_window_Data)<-colnames(extract_data)
+    time_window_Data2<-rbind(dat[i,],time_window_Data2)
+  }else{
+    time_window_Data2<-time_window_Data2
+  }
+  
+}
+
+dat<-time_window_Data2 ## Do we really need to slecet data set here?
+```
+
+- Parametrize here for reversing cancellations(Curently 7 for 7 day look ahead )
+```{r}
+#delete the canceled appts if it is cancel before 7 days; if is canceld after, then just keep the records
+dat$`Cancelled Date`<-as.POSIXct(dat$`Cancelled Date`, format = "%m/%d/%y")
+
+cancel_data<-dat[dat$`Appt Status`=="Canceled",]
+cancel_data<-cancel_data[cancel_data$`Appt Date`-cancel_data$`Cancelled Date`<=7,] #parametrize here for appointments cancelled. Currently 7 days
+## Should here be <= 7. Since we delete the appointments which are canceled before 7 days.
+
+dat<-dat[!dat$`Appt Status`=="Canceled",]
+
+
+#combine the cancel data with the dat
+dat<-rbind(cancel_data,dat)
+##why not work here
+```
+
+### 4.4 Using appointment information to calculate rooms will be used.
+- This part is actually the prediction totally based on the appointmen.
+```{r}
+dat <- dat[!is.na(dat$startOfAppt) & !is.na(dat$endOfAppt),]
+# order data chronologically
+dat <- dat[order(dat$`Appt Date`, dat$`Morning/Afternoon`, dat$startOfAppt),]
+#rownames(dat) <- 1:nrow(dat)
+dat$Session <- paste(dat$`Appt Date`, dat$`Morning/Afternoon`)
+```
+
+```{r warning = FALSE, message = FALSE}
+library(knitr)
+library(plyr)
+q<-as.data.frame(table(dat$`Appt Date`))
+q2<-as.data.frame(table(unique(dat$Session)))
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(q$Freq), sum(q2$Freq))
+colnames(rooms) <- unique(dat$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(dat)){
+  if ((dat$`Appt Date`[z] == dat$`Appt Date`[z-1]) & 
+      (dat$`Morning/Afternoon`[z] == dat$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (dat$endOfAppt[k] > dat$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(dat)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (dat$`Appt Date`[z] != dat$`Appt Date`[z-1] |
+           dat$`Morning/Afternoon`[z] != dat$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df_1 <- data.frame(maxrooms)
+maxrooms.df_1$Session <- colnames(rooms)
+q3<-as.data.frame(table(dat$Session))
+maxrooms.df_1$Number.Patients <- q3$Freq
+detach(package:plyr)
+write.csv(maxrooms.df_1, file = "staffedrooms(sheduled).csv", row.names = FALSE)
+```
+
+### 4.5 create features
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+library(lubridate)
+library(readxl)
+library(readr)
+library(knitr)
+
+real_room<-read.csv("staffed.csv")
+#load the full patient data 
+datafile2<-"Neurology FY17.xlsx"
+#datafile2 <-"CleanedData.csv"
+#name_fy17 <- read_xlsx("Neurology FY17.xlsx")
+observed.data<- read_xlsx(datafile2)
+```
+
+
+```{r,echo=FALSE}
+
+#After looking at data, extract the useful information
+extract_data<-observed.data[c("Appt Date","Day of Week", "Appt Length","Morning/Afternoon", "Age of Date of Appt", "Race","Pat Sex","City","State" ,"Zip Code","Primary Payor","Secondary Payor","Appt Type","Made On Date","Appt Time" )]
+#extract_data<-observed.data[c("Appt.Date", "Day.of.Week", "Appt.Length", "Morning.Afternoon", "Age.of.Date.of.Appt", "Race", "Pat.Sex", "City", "State", "Zip.Code", "Primary.Payor", "Secondary.Payor", "Appt.Type", "Made.On.Time", "Appt.Time")]
+#colnames(extract_data) <- c("Appt Date","Day of Week", "Appt Length","Morning/Afternoon", "Age of Date of Appt", "Race","Pat Sex","City","State" ,"Zip Code","Primary Payor","Secondary Payor","Appt Type","Made On Date","Appt Time" )
+#Appointment types of "Service", "Research", "Phone Appt" are excluded.
+extract_data[,-c(1,3)]<-lapply(extract_data[,-c(1,3)],as.factor)
+
+
+
+#extract_data$`Age of Date of Appt`=as.numeric(extract_data$`Age of Date of Appt`)
+
+extract_data<-extract_data[(extract_data$`Appt Type`!="4879 - RESEARCH"
+                            &extract_data$`Appt Type`!= "5894 - PHONE APPT" &
+                              extract_data$`Appt Type`!="4670 - SERVICE"),]
+#drop the unused levels
+levels(extract_data$`Appt Type`)=droplevels(extract_data$`Appt Type`)
+
+```
+
+
+
+
+- creat 7 dayas time window to make prediction,only the appointment made before 7 days are taken into consideration
+```{r,echo=FALSE, warning=FALSE, include=FALSE}
+
+
+extract_data$`Appt Date`<-ymd(as.character((extract_data$`Appt Date`)))
+
+extract_data$`Made On Date`<-ymd(as.character(extract_data$`Made On Date`))
+
+cleaned_data<-extract_data
+
+time_window_Data<-data.frame()
+##extract_data[6560,] is an empty row
+extract_data<-extract_data[-6560,] 
+for (i in 1:nrow(extract_data)){
+  #two weeks ahead #para 
+  if (extract_data$`Appt Date`[i]-extract_data$`Made On Date`[i]>=7){  #Parametrize here. currently for 7 day Look ahead model
+    #colnames(time_window_Data)<-colnames(extract_data)
+    time_window_Data<-rbind(extract_data[i,],time_window_Data)
+  }else{
+    time_window_Data<-time_window_Data
+  }
+  
+}
+
+## We should eliminate canceled data here, and impute all the cancelled data with appt time !!!! like we did before.
+#extract_data<-time_window_Data
+# Or we just need to predict the influence of cancellation?
+#extract_data$`Cancelled Date`<-as.POSIXct(extract_data$`Cancelled Date`, format = "%m/%d/%y")
+
+#cancel_data<-extract_data[extract_data$`Appt Status`=="Canceled",]
+#cancel_data<-cancel_data[cancel_data$`Appt Date`-cancel_data$`Cancelled Date`<=7,] #parametrize here for appointments cancelled. Currently 7 days
+#extract_data <- extract_data[!extract_data$`ApptStatus` ==
+                               #"Canceled",]
+#combine the cancel data with the dat
+#dat<-rbind(cancel_data,extract_data)
+
+#insurance type grouping
+#1--public:tricare,chip,medicare
+#2--private:everything else
+extract_data$Insurance<-"Private Insurance"
+extract_data$Insurance[grep("TRICARE",extract_data$`Primary Payor`)]<-"Public Insurance"
+extract_data$Insurance[grep("MEDICARE",extract_data$`Primary Payor`)]<-"Public Insurance"
+extract_data$Insurance[grep("CHIP",extract_data$`Primary Payor`)]<-"Public Insurance"
+extract_data$Insurance<-as.factor(extract_data$Insurance)
+## ??don't eliminate cancel date??
+```
+
+
+- import the distance matrix made by zipocde
+```{r,echo=FALSE}
+my_distance<-read.csv("swpazctadistance.csv")
+colnames(my_distance)=my_distance[1,]
+rownames(my_distance)=my_distance[,2]
+my_distance<-my_distance[-1,-1]
+```
+
+
+```{r,echo=FALSE,message=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#chp zipcode 15224
+#which(row.names(my_distance)==15224)
+#82
+chp_distance<-data.frame(my_distance[,c(1,83)])
+colnames(chp_distance)<-c("Zip Code","chp_distance")
+```
+
+
+- This part is to calculate distance between patients and hospital
+```{r,echo=FALSE,message=FALSE, message=FALSE, include=FALSE}
+#Distance mapping by zipcode:chp zipcode 15224
+#Match the patient distance to zip code 15224
+##length(unique(extract_data$`Zip Code`)) = 1678
+##But length(unique(chp_distance$`Zip Code`)) = 520
+code_miss <- extract_data$`Zip Code`[!(extract_data$`Zip Code` %in% chp_distance$`Zip Code`)]
+length(code_miss)
+str(extract_data$`Zip Code`)
+str(chp_distance$`Zip Code`)
+extract_data$`Zip Code` <- as.character(extract_data$`Zip Code`)
+str(extract_data$`Zip Code`)
+extract_data$`Zip Code` <- substr(extract_data$`Zip Code`, 1, 5)
+code_miss <- as.character(extract_data$`Zip Code`[!(extract_data$`Zip Code` %in% chp_distance$`Zip Code`)])
+length(code_miss)
+code_miss_1 <- as.factor(substr(code_miss, 1, 3))
+dist_levl <- data.frame(levels(code_miss_1))
+# lets do some experiments
+#library(ggmap)
+#code_miss_150 <- code_miss[startsWith(code_miss,"150")]
+# the ditance from 15047 to 15224 is 18 miles
+#code_miss_151 <- code_miss[startsWith(code_miss,"151")]
+# the ditance from 15217 to 15224 is 3.3 miles
+#code_miss_152 <- code_miss[startsWith(code_miss,"152")]
+# the ditance from 15289 to 15224 is 1.9 miles, from 15231 to 15224 is 21.4 miles 
+#code_miss_153 <- code_miss[startsWith(code_miss,"153")]
+# No result for 15365
+#code_miss_154 <- code_miss[startsWith(code_miss,"154")]
+# No result for 15435 ,15465, 15488
+#code_miss_155 <- code_miss[startsWith(code_miss,"155")]
+#levels(as.factor(code_miss_155))
+# the ditance from 15521 to 15224 is 94.3 miles, from 15522 is 121.7 miles,from 15533 is 128 miles, from 15522 is 71.9 miles
+#code_miss_156 <- code_miss[startsWith(code_miss,"156")]
+# the ditance from 15616 to 15224 is 30.7 miles, no result for 15619, from 15691 is 20.7 miles
+#code_miss_157 <- code_miss[startsWith(code_miss,"157")]
+#levels(as.factor(code_miss_157))
+# the ditance from 15711 to 15224 is 75.8 miles, from 15715 is 79.2 miles, from 15778 is 62.5 miles, from 15750 is 42.5 miles
+#code_miss_158 <- code_miss[startsWith(code_miss,"158")]
+#levels(as.factor(code_miss_158))
+# the ditance from 15801 to 15224 is 93 miles, from 15823 is 100 miles, from 15870 is 126 miles, from 15845 is 116 miles
+#code_miss_159 <- code_miss[startsWith(code_miss,"159")]
+#levels(as.factor(code_miss_159))
+# the ditance from 15801 to 15224 is 76 miles, from 15945 is 66.8 miles, from 15959 is 65 miles.
+
+#code_miss_160 <- code_miss[startsWith(code_miss,"160")]
+# the ditance from 16039 to 15224 is 30 miles, from 16003 is 30 miles
+#code_miss_161 <- code_miss[startsWith(code_miss,"161")]
+# the ditance from 16131 to 15224 is 84.5 miles, from 16110 is 81.2 miles
+#code_miss_170 <- code_miss[startsWith(code_miss,"170")]
+#levels(as.factor(code_miss_170))
+# the ditance from 17004  to 15224 is not found , from 17015 is 172 miles
+
+## we can roughly draw a conclusion that most missing zip codes are very far from 15224 except for 150, 151, 152 ,153.
+
+code_add <- data.frame(code_miss)
+#code_add <- code_miss
+code_add[, "chp_distance"] <- NA
+colnames(code_add) <- colnames(chp_distance)
+code_add$`Zip Code` <- as.character(code_add$`Zip Code`)
+for(i in 1: nrow(code_add)){
+  if (startsWith(code_add$`Zip Code`[i], "150") | startsWith(code_add$`Zip Code`[i], "151") | startsWith(code_add$`Zip Code`[i], "152") | startsWith(code_add$`Zip Code`[i], "153")){
+    code_add$chp_distance[i] <- 15
+  }else{
+    code_add$chp_distance[i] <- 9999
+  }
+}
+
+# We can't run the code below, because we set 9999999 when the distance is so far which will largely influence the mean if we group by the first three digits.
+chp_distance_missing <- chp_distance
+chp_distance_missing$`Zip Code` = as.character(substr(chp_distance_missing$`Zip Code`, 1, 3))
+distance_avg <- split(chp_distance_missing$chp_distance, chp_distance_missing$`Zip Code`)
+
+code_add$`Zip Code` <- as.character(code_add$`Zip Code`)
+chp_distance <- rbind(chp_distance, code_add)
+code_miss_add <- as.character(extract_data$`Zip Code`[!(extract_data$`Zip Code` %in% as.character((chp_distance$`Zip Code`)))])
+length(code_miss_add)
+str(extract_data$`Zip Code`)
+chp_distance$`Zip Code` <- as.character(chp_distance$`Zip Code`)
+#dist_15 <- mapdist("15217", "15224")["miles"]
+#dist_cal <- data.frame(extract_data$`Zip Code`)
+#dist_cal$extract_data..Zip.Code. <- #as.character(dist_cal$extract_data..Zip.Code.)
+#dist_cal[, "len"] <- NA
+#colnames(dist_cal) <- c("From", "len")
+#for (i in 1 : nrow(dist_cal)) {
+# dist_cal$len[i] <- mapdist(dist_cal$From[i], "15224")["miles"]
+#}
+
+
+extract_data$chp_distance <- chp_distance$chp_distance[match(extract_data$`Zip Code`, chp_distance$`Zip Code`)]
+##extract_data<-merge(extract_data,chp_distance,by=c("Zip Code"="Zip Code"))## This step reduced the number of rows significantly and we can;t use merge here
+
+
+#extract_data<-extract_data[,c(1 : 9, 11 : 17, 10)]
+#summary(extract_data$chp_distance)
+# group by distance
+extract_data$Dsiatnce_index<-ifelse(extract_data$chp_distance<10,"Near",ifelse(extract_data$chp_distance>25,"Far","Medium"))
+extract_data$Dsiatnce_index<-as.factor(extract_data$Dsiatnce_index)
+#If the travailing distance is less than 10 miles, it is in range "Near"; if the traveling distance is above 40 miles, then it is grouped as "Far"; Anything fall between is "Medium" distance.
+```
+
+
+
+```{r,echo=FALSE,message=FALSE}
+#aggregate the data
+#Am data
+am<-extract_data[extract_data$`Morning/Afternoon`=="AM - MORNING",]
+#pm
+pm<-extract_data[extract_data$`Morning/Afternoon`=="PM - AFTERNOON",]
+
+#split the data
+split_am_data<-split(am,am$`Appt Date`)
+split_pm_data<-split(pm,pm$`Appt Date`)
+total_apt_length_am<-sapply(split_am_data,
+                            function(x)sum(x[["Appt Length"]]))
+total_apt_length_pm<-sapply(split_pm_data,
+                            function(x)sum(x[["Appt Length"]]))
+
+am_age<-lapply(split_am_data,
+                            function(x)table(x[["Age of Date of Appt"]]))
+
+pm_age<-lapply(split_pm_data,
+                            function(x)table(x[["Age of Date of Appt"]]))
+
+
+
+race_am<-lapply(split_am_data,
+                            function(x)table(x[["Race"]]))
+
+race_pm<-lapply(split_pm_data,
+                            function(x)table(x[["Race"]]))
+
+gender_am<-lapply(split_am_data,
+                            function(x)table(x[["Pat Sex"]]))
+gender_pm<-lapply(split_pm_data,
+                            function(x)table(x[["Pat Sex"]]))
+
+
+insurance_am<-lapply(split_am_data,
+                            function(x)table(x[["Insurance"]]))
+
+insurance_pm<-lapply(split_pm_data,
+                            function(x)table(x[["Insurance"]]))
+
+patient_type_am<-lapply(split_am_data,
+                            function(x)table(x[["Appt Type"]]))
+patient_type_pm<-lapply(split_pm_data,function(x)table(x[["Appt Type"]]))
+
+
+distance_am<-lapply(split_am_data, function(x) table(x[["Dsiatnce_index"]]))
+
+distance_pm<-lapply(split_pm_data, function(x) table(x[["Dsiatnce_index"]]))
+
+
+```
+
+
+
+
+```{r,echo=FALSE}
+#Group data into specific range
+#age
+Age1to4<-list()
+Age5to8<-list()
+Age9to12<-list()
+Age13to18<-list()
+Age_else<-list()
+##lenth(am_age, pm_age, distance_am.....should equal to 257)
+## why for is i in 1:255
+for(i in 1:length(split_am_data)){
+  #am_age[[i]]<-sort(am_age[[i]])
+  am_age[[i]]<-am_age[[i]][order(as.numeric(names(am_age[[i]])))]
+  Age1to4[i]<-sum(am_age[[i]][1:5])
+  Age5to8[i]<-sum(am_age[[i]][6:9])
+  Age9to12[i]<-sum(am_age[[i]][10:13])
+  Age13to18[i]<-sum(am_age[[i]][14:19])
+  Age_else[i]<-sum(am_age[[i]][20:51])
+}
+
+
+Age_data<-data.frame(Age1to4=unlist(Age1to4),Age5to8=unlist(Age5to8),
+                     Age9to12=unlist(Age9to12),Age13to18=unlist(Age13to18),Age_else=unlist(Age_else))
+
+
+
+Age_data$APT_DAY<-paste(names(am_age[1:nrow(Age_data)]),"AM")
+Age_data<-Age_data[,c(6,1:5)]
+
+#race
+Race_white<-list()
+Race_black<-list()
+Race_other<-list()
+
+
+for(i in 1:length(split_am_data)){
+  Race_white[i]<-sum(race_am[[i]][15])
+  Race_black[i]<-sum(race_am[[i]][3])
+  Race_other[i]<-sum(race_am[[i]][c(1:2,4:14)])
+}
+
+Race_data<-data.frame(Race_white=unlist(Race_white),Race_black=unlist(Race_black),Race_other=unlist(Race_other))
+Race_data$APT_DAY<-paste(names(race_am[1:nrow(Race_data)]),"AM")
+
+
+
+#gender, apt length, total number of patients, patient type
+new_cat<-data.frame()
+for (i in 1:length(split_am_data)){
+ update<-c(total_apt_length_am[[i]],nrow(split_am_data[[i]]),gender_am[[i]], patient_type_am[[i]],insurance_am[[i]],distance_am[[i]])
+  new_cat<-rbind(new_cat,update)
+}
+new_cat<-new_cat[,c(1:6,11:15)]
+colnames(new_cat)<-c("Total apt length","Total number of patients","Female","Male","New Patient","Return Patient","Private Insurance","Public Insurance","Far","Medium","Near")
+new_cat$APT_DAY=paste(names(gender_am[1:nrow(new_cat)]),"AM")
+
+
+#Combine all data into one
+one<-merge(Age_data,Race_data,by=c("APT_DAY"="APT_DAY"))
+
+am_data<-merge(one,new_cat,by=c("APT_DAY"="APT_DAY"))
+```
+
+
+
+```{r,echo=FALSE}
+
+Age1to4<-list()
+Age5to8<-list()
+Age9to12<-list()
+Age13to18<-list()
+Age_else<-list()
+for(i in 1:length(split_pm_data)){
+  pm_age[[i]]<-pm_age[[i]][order(as.numeric(names(pm_age[[i]])))]
+  Age1to4[i]<-sum(pm_age[[i]][1:5])
+  Age5to8[i]<-sum(pm_age[[i]][6:9])
+  Age9to12[i]<-sum(pm_age[[i]][10:13])
+  Age13to18[i]<-sum(pm_age[[i]][14:19])
+  Age_else[i]<-sum(pm_age[[i]][20:51])
+}## why is i in 250 not 257. There are 257 obs in each list
+
+
+Age_data_2<-data.frame(Age1to4=unlist(Age1to4),Age5to8=unlist(Age5to8),
+                     Age9to12=unlist(Age9to12),Age13to18=unlist(Age13to18),Age_else=unlist(Age_else))
+
+
+
+Age_data_2$APT_DAY<-paste(names(pm_age[1:nrow(Age_data_2)]),"PM")
+Age_data_2<-Age_data_2[,c(6,1:5)]
+
+#race
+Race_white<-list()
+Race_black<-list()
+Race_other<-list()
+
+
+for(i in 1:length(split_pm_data)){
+  Race_white[i]<-sum(race_pm[[i]][15])
+  Race_black[i]<-sum(race_pm[[i]][3])
+  Race_other[i]<-sum(race_pm[[i]][c(1:2,4:14)])
+}
+
+Race_data<-data.frame(Race_white=unlist(Race_white),Race_black=unlist(Race_black),Race_other=unlist(Race_other))
+Race_data$APT_DAY<-paste(names(race_pm[1:nrow(Race_data)]),"PM")
+
+
+
+#gender, apt length, total number of patients, patient type
+new_cat_2<-data.frame()
+for (i in 1:length(split_pm_data)){
+ update<-c(total_apt_length_pm[[i]],nrow(split_pm_data[[i]]),gender_pm[[i]], patient_type_pm[[i]],insurance_pm[[i]],distance_pm[[i]])
+  new_cat_2<-rbind(new_cat_2,update)
+}
+new_cat_2<-new_cat_2[,c(1:6,11:15)]
+colnames(new_cat_2)<-c("Total apt length","Total number of patients","Female","Male","New Patient","Return Patient","Private Insurance","Public Insurance","Far","Medium","Near")
+new_cat_2$APT_DAY=paste(names(gender_pm[1:length(split_pm_data)]),"PM")
+
+
+#Combine all data into one
+TWO<-merge(Age_data_2,Race_data,by=c("APT_DAY"="APT_DAY"))
+
+pm_data<-merge(TWO,new_cat_2,by=c("APT_DAY"="APT_DAY"))
+#combine am and pm data
+new_data<-rbind(am_data,pm_data)
+
+```
+
+- Match the data with staffed rooms
+```{r,echo=FALSE}
+real_room<-real_room[,-1]
+colnames(real_room)[2]<-"APT_DAY"
+
+```
+
+
+```{r,echo=FALSE}
+real_room$APT_session<-as.factor(unlist(lapply(as.character(real_room$APT_DAY),
+                        function(x){strsplit(x," ")[[1]][[2]]
+  
+})))
+real_room$APT_DAY<-unlist(lapply(as.character(real_room$APT_DAY),
+                        function(x){ paste(strsplit(x," ")[[1]][[1]],
+                                           strsplit(x," ")[[1]][[2]])
+  
+}))
+
+
+real_room$Day_of_Week<-wday(unlist(lapply(as.character(real_room$APT_DAY),
+                        function(x){strsplit(x," ")[[1]][1]
+  
+})))
+
+colnames(real_room)[1]<-"Staffed.Rooms"
+
+#new_data<-new_data[,-nrow(new_data)]
+aggregate_data<-merge(real_room,new_data,by=c("APT_DAY"="APT_DAY"),sep=",")
+#reorder the order of columns so the target is at the very front
+
+#aggregate_data<-aggregate_data[,-4]
+#aggregate_data$day_of_week<-wday(aggregate_data$APT_DAY)
+  
+rownames(aggregate_data)=aggregate_data$APT_DAY
+
+#aggregate_data<-aggregate_data[,-c(1,4)]
+#remove the random predictors
+
+#aggregate_data<-aggregate_data[,-c(3,4,5)]
+
+```
+
+
+
+Derived from Algorithm for Staffed Room Estimation
+```{r,echo=FALSE}
+#get the scheduled rooms:by using kim's method to get the number of scheduled rooms and then use it as one of predictor
+#refering to kim's analysis on the conditional expected length of each apt 
+apt<-data.frame("apt length"=c(20,30,40,45,60),meanapt=c(39,56,46,75,68),stedv=c(25,32,27,36,32))
+## What's the use of this part
+```
+
+
+```{r,echo=FALSE}
+maxrooms.df[!maxrooms.df$Session %in% maxrooms.df_1$Session,]$Session
+rooms<-maxrooms.df_1[,c(1,2)]
+rooms$APT_DAY<-unlist(lapply(as.character(rooms$Session),
+                        function(x){ paste(strsplit(x," ")[[1]][[1]],
+                                           strsplit(x," ")[[1]][[2]])
+  
+}))
+
+
+rooms<-rooms[,-2]
+colnames(rooms)[1]<-"SchduleRoom"
+#Merge two dataset
+aggregate_data$APT_DAY<-rownames(aggregate_data)
+# if we use merge not for here rmse would be much better, only 4 rows difference
+aggregate_data<-merge(aggregate_data,rooms,by=c("APT_DAY"="APT_DAY"))
+#for(i in 1 : nrow(aggregate_data)){
+  #for(j in 1 : nrow(rooms)){
+    #if(aggregate_data$APT_DAY[i] == rooms$APT_DAY[j]){
+     # aggregate_data$SchduleRoom[i] <- rooms$SchduleRoom[j]
+   # }
+  #}
+#}
+#aggregate_data[!aggregate_data$APT_DAY %in% rooms$APT_DAY,]$SchduleRoom <- 0
+rownames(aggregate_data)<-aggregate_data$APT_DAY
+#aggregate_data<-aggregate_data[,-1]
+aggregate_data$APT_DAY<-rownames(aggregate_data)
+write.csv(aggregate_data, file = "aggregatedate(ori).csv", row.names = FALSE)
+```
+
+```{r,echo=FALSE,message=FALSE}
+library(caret)
+
+set.seed(1)
+control<-trainControl(method="cv",number=10)
+
+Metric <- "RMSE"
+set.seed(1)
+random_index<-sample(1:nrow(aggregate_data),(nrow(aggregate_data)*0.1))
+
+mytraining<-aggregate_data[-random_index,]
+mytesting<-aggregate_data[random_index,]
+##plot(x=mytraining$Staffed.Rooms,y=mytraining$SchduleRoom,main="Staffed rooms vs schedule rooms ",xlab="Number of staffed rooms",ylab="Number of schedule rooms")
+```
+
+### 4.6 Generalized Linear Model(the best model we find during previous work)
+
+```{r}
+set.seed(1) 
+model_glmfeature<- train(Staffed.Rooms~ Number.Patients + SchduleRoom + Day_of_Week + Age_else + Age5to8 , data=mytraining, method="glm", metric=Metric, trControl=control)
+final_glmfeat<-predict(model_glmfeature,mytesting)
+final_error_feat<-sqrt(mean((final_glmfeat-mytesting$Staffed.Rooms)^2))
+final_error_feat
+#final_error_feat is 1.12 which was beyond the confidence 
+#interval should we change CV = 5 or p to 0.1 ?
+#95% confidence interval
+model_error_ci.lower <- model_glmfeature$results$RMSE - 2.262*(model_glmfeature$results$RMSESD/3)
+model_error_ci.upper <- model_glmfeature$results$RMSE + 2.262*(model_glmfeature$results$RMSESD/3)
+final_error_ci <- c(model_error_ci.lower, model_error_ci.upper )
+## the final_error_feat is out bound of ci?
+```
+
+### 4.7 For the sake of convenience I'd like to change the original predictive model and make it a function 
+```{r}
+Caculate_Maxroom <- function (real, datadirectory = "C:/TEXTBOOK/CHP/REPOSITORY_Ambulatory/pitt-chp-ambulatory/Missing Value(Neurology)", aggdata = "aggregatedate(ori).csv"){
+real_room <- read.csv(file.path(datadirectory, real))
+real_room$APT_DAY<-unlist(lapply(as.character(real_room$Session),
+                        function(x){ paste(strsplit(x," ")[[1]][[1]],
+                                           strsplit(x," ")[[1]][[2]])
+  
+}))
+
+aggregate_data <- read.csv(file.path(datadirectory, aggdata))
+for(i in 1 : nrow(aggregate_data)){
+  for(j in 1 : nrow(real_room)){
+    if(aggregate_data$APT_DAY[i] == real_room$APT_DAY[j]){
+      aggregate_data$Staffed.Rooms[i] <-    real_room$Staffed.Rooms[j]
+    }
+  }
+}
+
+library(caret)
+
+set.seed(1)
+control<-trainControl(method="cv",number=10)
+
+Metric <- "RMSE"
+set.seed(1)
+random_index<-sample(1:nrow(aggregate_data),(nrow(aggregate_data)*0.1))
+
+mytraining<-aggregate_data[-random_index,]
+mytesting<-aggregate_data[random_index,]
+agg = read.csv(file.path(datadirectory,aggdata))
+oritesting <- agg[-random_index,]
+##plot(x=mytraining$Staffed.Rooms,y=mytraining$SchduleRoom,main="Staffed rooms vs schedule rooms ",xlab="Number of staffed rooms",ylab="Number of schedule rooms")
+
+set.seed(1)
+model_glmfeature <- train(Staffed.Rooms~ Number.Patients + SchduleRoom + Day_of_Week + Age_else + Age5to8 , data=mytraining, method="glm",metric=Metric, trControl=control)
+#final_glmfeat_model<-predict(model_glmfeature,mytesting)
+final_glmfeat<-predict(model_glmfeature,oritesting)
+#final_ori_error<-sqrt(mean((final_glmfeat-mytesting$Staffed.Rooms)^2))
+final_ori_error <- model_glmfeature$results$RMSE
+final_error_feat<-sqrt(mean((final_glmfeat-oritesting$Staffed.Rooms)^2))
+final_result <- c(final_ori_error, final_error_feat)
+return(final_result)
+}
+```
+
+
+
+
+# 5. Creating missing values artificially.
+
+- There're mainly two types of missing values
+
+- Case 3: Rooming Form is present, Depart Summary is not present. The ratio of case 3 is 0.036
+
+- Case 4.1: Rooming Form is not present, Depart Summary is not present, Check In Time is present. The ratio of case 4.1 is 0.058
+
+- In order to find out the effection of missing values and the way we impute them, I'll artifically create datasets with different proportion of missing values and use different methods to impute them. Then I'll compare the imputed datasets with the original dataset, also I'll compare the result of final predictive model using imputed datasets with the results using real dataset. Since the way we used in "staffedrooms(ori).csv" works pretty well in later work, We can assume the data set we use is a perfect dataset.
+
+- Since the the ratio of case 3 is 0.036 and the ratio of case 4.1 is 0.058. There is already almost 10 percent of missing value in the oringinal dataset while we got a perfect dataset by imputation.
+I decide to magnify the percentage of missing values according to their ratio (case 3 / case 4.1 = 0.63)
+
+- missing value ratio
+```{r readpercentage}
+#mp1 <- read_excel("missngpercentage.xlsx")
+#colnames(mp1) <- c("case", "15 percent", "25 percent", "35 percent", "45 percent")
+case3 <- c(5.7, 9.5, 13.3, 17.1)
+case4.1 <- c(9.3, 15.5, 21.7, 27.9)
+mp <- rbind(case3, case4.1)
+mp <-data.frame(mp)
+colnames(mp) <- c("15 percent", "25 percent", "35 percent", "45 percent")
+```
+
+##5.1 Create dataset with 15 percent of missing value
+```{r}
+dat <- dat_or
+dat_1 <- dat
+pointer_or <- which((is.na(dat_1$`Depart Summary`) & !is.na(dat_1$`Rooming Form`)) | ((is.na(dat_1$`Depart Summary`) & is.na(dat_1$`Rooming Form`) & !is.na(dat_1$`Check In Time`))))
+length(pointer_or)/nrow(dat_1)
+pointer <- as.integer(1 : nrow(dat_1))
+# case3 percentage
+case3_per <- nrow(dat[!is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+pointer_mis_case3 <- sample(pointer[-pointer_or], size = (mp$`15 percent`[1]/100 - case3_per) * nrow(dat))
+mis_data <- dat
+mis_data$`Depart Summary`[pointer_mis_case3] <- NA
+pointer_mis_case4.1 <- sample(pointer[-pointer_mis_case3][-pointer_or], size = (mp$`15 percent`[2]/100 - 0.058)* nrow(dat))
+mis_data$`Rooming Form`[pointer_mis_case4.1] <- NA
+mis_data$`Depart Summary`[pointer_mis_case4.1] <- NA
+## validate the number of missing values
+nrow(mis_data[!is.na(mis_data$`Rooming Form`) & is.na(mis_data$`Depart Summary`),])/nrow(mis_data) + nrow(mis_data[is.na(mis_data$`Rooming Form`) & is.na(mis_data$`Depart Summary`) & !is.na(mis_data$`Check In Time`),])/nrow(mis_data)
+```
+
+### 5.1.1 Impute the dataset using conditional imputation
+
+- Conditional imputation is a very straightforward method. In this part we get LOS based its appointment length
+
+- In conditional imputation
+ - Case 3: Start of Appointment = Rooming Form, End of Appointment = Rooming Form + average appointment length for the given patient's intended appointment length
+ - Case 4.1: Start of Appointment = Check In Time + 30 minutes, End of Appointment = calculated start of appointment + average appointment length for the given patient's intended appointment length 
+
+```{r}
+mis_data_ci <- mis_data
+# declare start of appointment
+mis_data_ci$startOfAppt <- mis_data_ci$`Rooming Form`
+
+# format check in time to match rooming form
+##mis_data_ci$`Check In Time` <- sub("([0-9])([A-Z])", "\\1 \\2", mis_data_ci$`Check In Time`)
+mis_data_ci$`Check In Time` <- as.POSIXct(mis_data_ci$`Check In Time`, format = "%m/%d/%Y %I:%M %p")
+# format check out time to match rooming form
+##mis_data_ci$`Check Out Time` <- sub("([0-9])([A-Z])", "\\1 \\2", mis_data_ci$`Check Out Time`)
+mis_data_ci$`Check Out Time` <- as.POSIXct(mis_data_ci$`Check Out Time`, format = "%m/%d/%Y %I:%M %p")
+
+# (case 4.1) use check in time + delay when rooming form not available
+for (i in 1:nrow(mis_data_ci)) {
+  if(is.na(mis_data_ci$startOfAppt[i])) {
+    mis_data_ci$startOfAppt[i] <- mis_data_ci$`Check In Time`[i] + checkInDelay*secInMin
+  }
+}
+
+# declare end of appointment
+mis_data_ci$endOfAppt <- mis_data_ci$`Depart Summary`
+
+# find average time in room for different appointment lengths
+# calculate length of stay and only use valid lengths
+mis_data_ci$LOS <- as.numeric(difftime(mis_data_ci$endOfAppt, mis_data_ci$startOfAppt, units = "mins"))
+mis_data_ci <- mis_data_ci[(mis_data_ci$LOS>minApptLength &
+             mis_data_ci$LOS<maxApptLength)|
+             is.na(mis_data_ci$LOS),]
+nrow(mis_data_ci[mis_data_ci$LOS<minApptLength | mis_data_ci$LOS > maxApptLength,])
+### should we use the average length to replace the invalid lengths not just delete them?
+
+# find averages for each appointment length
+# find averages for each appointment length
+losAvg1 <- mis_data_ci %>% dplyr::group_by(`Appt Length`) %>%
+            dplyr::summarise(Mean=round(mean(LOS, na.rm = TRUE)),
+                      Stdev=round(sd(LOS, na.rm = TRUE)),
+                      N = n_distinct(`Check In Time`) )
+#losAvg1 <- losAvg1[losAvg1$N >= minN & !is.na(losAvg1$`Appt Length`),]
+
+# (case 3): use start of appointment + estimated time in room when depart summary not available
+for (i in 1:nrow(mis_data_ci)) {
+  if (is.na(mis_data_ci$endOfAppt[i])&
+      !is.na(mis_data_ci$startOfAppt[i])) {
+    for (j in 1:nrow(losAvg1)) {
+      if (mis_data_ci$`Appt Length`[i] == losAvg1$`Appt Length`[j]) {
+        mis_data_ci$LOS[i] <- losAvg1$Mean[j]
+      }
+    }
+    mis_data_ci$endOfAppt[i] <- mis_data_ci$startOfAppt[i] + mis_data_ci$LOS[i]*secInMin
+  }
+}
+sum(is.na(mis_data_ci$endOfAppt))
+mis_data_ci <- mis_data_ci[!is.na(mis_data_ci$endOfAppt),]
+# add allowance for end of appointment
+mis_data_ci$endOfAppt<- mis_data_ci$endOfAppt + 10*60
+
+#Reclassify morning patients as afternoon if entered room after 12:00PM, reclassify afternoon patients as morning if entered exam room before 12:00 PM
+for (i in 1:nrow(mis_data_ci))
+{
+  if(hour(mis_data_ci$startOfAppt[i])>=12)
+  {mis_data_ci$`Morning/Afternoon`[i] <- "PM - AFTERNOON"}
+  else if (hour(mis_data_ci$startOfAppt[i])<12)
+  {mis_data_ci$`Morning/Afternoon`[i] <- "AM - MORNING"}
+}
+mis_data_ci <- mis_data_ci[order(mis_data_ci$`Appt Date`, mis_data_ci$`Morning/Afternoon`, mis_data_ci$startOfAppt),]
+mis_data_ci <- mis_data_ci[!is.na(mis_data_ci$endOfAppt),]## why there are missing values here
+sum(is.na(mis_data_ci$startOfAppt))
+sum(is.na(mis_data_ci$endOfAppt))
+```
+
+#### 5.1.1.2 Use new imputated dataset to caculate Maxroom
+
+```{r, warning=FALSE, include=FALSE}
+staffedrooms_ci <- Caculate_staff(mis_data_ci)
+write.csv(staffedrooms_ci, file = "staffedrooms(ci).csv", row.names = FALSE)
+```
+
+#### 5.1.1.3 caculate the staffed room using data set which delete all the missing value
+```{r, echo=FALSE, warning=FALSE}
+mis_data_del <- mis_data
+del_15 <- mis_data_del[!is.na(mis_data$`Rooming Form`) & !is.na(mis_data$`Depart Summary`),]
+staffed_del_15 <- Caculate_staff(del_15)
+write.csv(staffed_del_15, file = "staffedrooms(del_15).csv", row.names = FALSE)
+room_del_15 <- read.csv("staffedrooms(del_15).csv")
+room_ori <- read.csv("staffedrooms(ori).csv")
+## Find out sessions don't contained in del data set, set staffed room to 0
+diff_session <- room_ori[!(room_ori$Session %in% room_del_15$Session),]
+room_del_15 <- rbind(room_del_15, setNames(room_ori[!(room_ori$Session %in% room_del_15$Session),], names(room_del_15)))
+#set staffed room to 0
+room_del_15[room_del_15$Session %in% diff_session$Session,]$Staffed.Rooms <- 0
+# Order data by Session
+room_del_15$Session <- as.POSIXct(room_del_15$Session)
+room_del_15 <- room_del_15[order(room_del_15$Session, room_del_15$Morning.Afternoon),]
+diff_del_15 <- abs(room_del_15$Staffed.Rooms - room_ori$Staffed.Rooms)
+del_15_rmse <- sqrt(mean((room_del_15$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+del_15_rmse
+```
+#### 5.1.1.4 Compare the staffedrooms(ci) with staffedrooms(ori)
+
+```{r}
+room_ci <- read.csv("staffedrooms(ci).csv")
+room_ori <- read.csv("staffedrooms(ori).csv")
+diff_ci <- abs(room_ci$Staffed.Rooms - room_ori$Staffed.Rooms)
+ci_rmse <- sqrt(mean((room_ci$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+ci_rmse
+```
+
+### 5.1.2 Impute the dataset using linear regression
+
+- The second way for imputation is linear regression.
+  - linear regression is widely used and highly interpretable.
+  - use backfoward selection to get optimal model
+  - Case 3: Start of Appointment = Rooming Form, End of Appointment = Rooming Form + LOS: we use linear regression to predict the length of stay.
+  - Case 4.1: Start of Appointment = Check In Time + LOW, Depart Summary = Rooming Form + LOS, endOfAppt = Depart Summary + 10*60: we use linear regression to predict the length of waiting and the length of stay.
+  
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+#Build linear regression model for LOW  to deal with missing values in Rooming Form
+dat_lr <- mis_data
+# Since many of the columns are related to geographic positions of the patients, I'd like to change all these independent variables into Distance between patients and clinic.
+#my_distance <- read.csv(file.path(datadirectory,"swpazctadistance.csv"))
+#colnames(my_distance) = my_distance[1,]
+#rownames(my_distance) = my_distance[,2]
+#my_distance <- my_distance[-1,-1]
+#chp_distance <- data.frame(my_distance[,c(1,83)])
+#colnames(chp_distance) <- c("Zip Code","chp_distance")
+#dat_lr <- merge(dat_lr,chp_distance,by=c("Zip Code"="Zip Code"))
+## There're strange distance value in the previous step which are caused by origianal distance dataset. I'm afraid this will cause error in linear regression model and the merge will reduce the rows of the data set
+dat_lr <- dat_lr[, !names(dat_lr) %in% c("City","State" ,"Zip Code")]
+dat_lr$LOW <- as.numeric(difftime(dat_lr$startOfAppt, dat_lr$`Check In Time`, units = "mins"))
+#Choose useful predictors and change the attributes of different independent variables for the sake of linear regression
+dat_lr <- dat_lr[, names(dat_lr) %in% c("Appt Date", "Appt Length", "Day of Week", "Provider", "Appt Time", "Morning/Afternoon", "Pat Sex","Age", "Appt Type", "chp_distance", "Check In Time", "Rooming Form", "Depart Summary","LOW", "startOfAppt", "endOfAppt", "LOS", "Session")]
+dat_lr$`Day of Week` <- as.factor(dat_lr$`Day of Week`)
+dat_lr$Provider <- as.factor(dat_lr$Provider)
+##dat_lr$`Appt Time` <- as.POSIXct(dat_lr$`Appt Time`, format = "%H:%M")
+##dat_lr$`Appt Time` <- format(dat_lr$`Appt Time`, format="%H:%M")
+## the code above automatically using today's date. It's too hard to convert colname Appt Time into POSIXct format without date. I suspect this will influence the result. I decide to change it to number
+dat_lr$`Appt Length` <- scale(dat_lr$`Appt Length`)
+dat_lr$hour <- hour(hm(dat_lr$`Appt Time`))
+dat_lr$minut <- minute(hm(dat_lr$`Appt Time`))
+dat_lr$appt_time <- 60*dat_lr$hour+dat_lr$minut
+dat_lr$appt_time <- scale(dat_lr$appt_time)
+dat_lr$`Morning/Afternoon` <- as.factor(dat_lr$`Morning/Afternoon`)
+dat_lr$`Pat Sex` <- as.factor(dat_lr$`Pat Sex`)
+dat_lr$`Appt Type` <- as.factor(dat_lr$`Appt Type`)
+dat_lr$Age <- scale(dat_lr$Age)
+#dat_lr$chp_distance <- scale(dat_lr$chp_distance)
+#Create training data and test data
+dat_lr_train <- dat_lr[!is.na(dat_lr$`Rooming Form`),]
+dat_lr_test <- dat_lr[is.na(dat_lr$`Rooming Form`),]
+LOW_lm <- lm(LOW ~ `Appt Date` + `Day of Week` + `Appt Length` + Provider + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_lr_train)
+summary(LOW_lm)
+## Since there are too many factors in the data set the result is very bad, I need to reduce predictors. I decide to eliminate columns which mostly have p-value bigger than 0.05
+LOW_lm_1 <- lm(LOW ~ appt_time + `Morning/Afternoon`, data = dat_lr_train)
+summary(LOW_lm_1)
+## The R-squared is very low. While P-values suggest that there are relation ships between LOW and appt_time + `Morning/Afternoon`, maybe I can try other nonlinear regression later.
+## Now use the model to predict missing values in Rooming Form
+LOW_pre <- predict(LOW_lm_1, dat_lr_test)
+## impute missing values in Rooming Form
+dat_lr_test$LOW <- LOW_pre
+dat_lr_test$`Rooming Form` <- dat_lr_test$`Check In Time` + dat_lr_test$LOW * 60
+dat_lr_test$startOfAppt <- dat_lr_test$`Rooming Form`
+dat_lr_2 <- rbind(dat_lr_test, dat_lr_train)
+sum(is.na(dat_lr_2$`Rooming Form`))
+## Now we use linear regression to predict LOS, then use Depart Summary = Rooming Form + LOS, endOfAppt = Depart Summary + 10*60 to calculate the time when patients live the room
+dat_lr_2_train <- dat_lr_2[!is.na(dat_lr_2$`Depart Summary`),]
+dat_lr_2_test <- dat_lr_2[is.na(dat_lr_2$`Depart Summary`),]
+LOS_lm_2_1 <- lm(LOS ~ `Appt Date` + `Day of Week` + `Appt Length` + Provider + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_lr_2_train)
+summary(LOS_lm_2_1)
+## R square is very low. I decide to get rid of all the factors which have high p-value
+LOS_lm_2_2 <- lm(LOS ~`Appt Length` + `Morning/Afternoon` + `Appt Type`, data = dat_lr_2_train)
+summary(LOS_lm_2_2)
+##impute missing values in Depart Summary
+LOS_lm_2_2$xlevels$`Appt Type` <- union(LOS_lm_2_2$xlevels$`Appt Type`, levels(dat_lr_2_test$`Appt Type`))
+LOS_pre <- predict(LOS_lm_2_2, dat_lr_2_test)
+dat_lr_2_test$LOS <- LOS_pre
+dat_lr_2_test$`Depart Summary` <- dat_lr_2_test$`Rooming Form` + dat_lr_2_test$LOS*60
+dat_lr_2_test$endOfAppt <- dat_lr_2_test$`Depart Summary` + 10*60
+dat_lr_2 <- rbind(dat_lr_2_train, dat_lr_2_test)
+sum(is.na(dat_lr_2$`Depart Summary`))
+```
+
+#### 5.1.2.2 Since we have already imputed all the missing values, let us use it to calculate staffed rooms
+```{r, echo=FALSE, warning=FALSE}
+# order data chronologically
+staffedrooms_lr <- Caculate_staff(dat_lr_2)
+write.csv(staffedrooms_lr, file = "staffedrooms(lr).csv", row.names = FALSE)
+room_lr <- read.csv("staffedrooms(lr).csv")
+diff_lr <- abs(room_lr$Staffed.Rooms - room_ori$Staffed.Rooms)
+lr_rmse <- sqrt(mean((room_lr$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+lr_rmse
+```
+
+### 5.1.3 Impute the data set using regression tree
+
+- There are many categorical predictors in the data set. linear regression seems to be bad in this situation. I decide to use regression tree to estimate LOS and LOW. Then use it to calculate staffed rooms.
+
+- Case 3: Start of Appointment = Rooming Form, End of Appointment = Rooming Form + LOS: we use regression tree to predict the length of stay.
+- Case 4.1: Start of Appointment = Check In Time + LOW, Depart Summary = Rooming Form + LOS, endOfAppt = Depart Summary + 10*60: we use regression tree to predict the length of waiting and the length of stay.
+
+```{r}
+dat_rt <- mis_data
+dat_rt <- dat_rt[, !names(dat_rt) %in% c("City","State" ,"Zip Code")]
+## When Check In Time is NA, delete it(in order to be accord with previous work: line 145)
+dat_rt <- dat_rt[!is.na(dat_rt$`Check In Time`),]
+dat_rt_test <- dat_rt[is.na(dat_rt$`Rooming Form`),]
+dat_rt$LOW <- as.numeric(difftime(dat_rt$startOfAppt, dat_rt$`Check In Time`, units = "mins"))
+dat_rt <- dat_rt[, names(dat_rt) %in% c("Appt Date", "Appt Length", "Day of Week", "Provider", "Appt Time", "Morning/Afternoon", "Pat Sex","Age", "Appt Type", "chp_distance", "Check In Time", "Rooming Form", "Depart Summary","LOW", "startOfAppt", "endOfAppt", "LOS", "Session")]
+dat_rt$`Day of Week` <- as.factor(dat_rt$`Day of Week`)
+dat_rt$Provider <- as.factor(dat_rt$Provider)
+dat_rt$hour <- hour(hm(dat_rt$`Appt Time`))
+dat_rt$minut <- minute(hm(dat_rt$`Appt Time`))
+dat_rt$appt_time <- 60*dat_rt$hour+dat_rt$minut
+dat_rt$`Morning/Afternoon` <- as.factor(dat_rt$`Morning/Afternoon`)
+dat_rt$`Pat Sex` <- as.factor(dat_rt$`Pat Sex`)
+dat_rt$`Appt Type` <- as.factor(dat_rt$`Appt Type`)
+## Use random forest to estimate LOW
+dat_rt_train <-as.data.frame(dat_rt[!is.na(dat_rt$`Rooming Form`),])
+dat_rt_test <- as.data.frame(dat_rt[is.na(dat_rt$`Rooming Form`),])
+#names(dat_rt_train) <- make.names(names(dat_rt_train))
+#names(dat_rt_test) <- make.names(names(dat_rt_test))
+library(rpart)
+rt_1 <- rpart(LOW ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt_train)
+#library(caret)
+#rt_1 <- train(x = dat_rt_train[, which(names(dat_rt_train) %in% c("Appt Date" ,"Day of Week","Appt Length", "appt_time", "Morning/Afternoon", "Pat Sex", "Age" ,"Appt Type"))], y = dat_rt_train$LOW, method = "rpart2", tuneLength = 5, trControl = trainControl(method = "cv"))
+##rt_1 <- randomForest(LOW ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt_train, ntree = 1000)
+## impute missing values in Rooming Form
+LOW_pre_rt <- predict(rt_1, dat_rt_test)
+dat_rt_test$LOW <- LOW_pre_rt
+dat_rt_test$`Rooming Form` <- dat_rt_test$`Check In Time` + dat_rt_test$LOW * 60
+dat_rt_test$startOfAppt <- dat_rt_test$`Rooming Form`
+dat_rt_2 <- rbind(dat_rt_test, dat_rt_train)
+sum(is.na(dat_rt_2$`Rooming Form`))
+## Use random forest to estimate LOS
+dat_rt2_train <-dat_rt_2[!is.na(dat_rt_2$`Depart Summary`),]
+dat_rt2_test <- dat_rt_2[is.na(dat_rt_2$`Depart Summary`),]
+rt_2 <- rpart(LOS ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt2_train)
+## impute missing values in Depart Summary
+LOS_pre_rt <- predict(rt_2, dat_rt2_test)
+dat_rt2_test$LOS <- LOS_pre_rt
+dat_rt2_test$`Depart Summary` <- dat_rt2_test$startOfAppt + dat_rt2_test$LOS*60
+dat_rt2_test$endOfAppt <- dat_rt2_test$`Depart Summary` + 10*60
+dat_rt_3 <- rbind(dat_rt2_test, dat_rt2_train)
+sum(is.na(dat_rt_3$`Depart Summary`))
+```
+
+#### 5.1.3.2 Now we can use the imputed dataset to calculate staffed rooms
+```{r, echo=FALSE, warning=FALSE}
+# order data chronologically
+staffedrooms_rt <- Caculate_staff(dat_rt_3)
+write.csv(staffedrooms_rt, file = "staffedrooms(rt).csv", row.names = FALSE)
+room_rt <- read.csv("staffedrooms(rt).csv")
+diff_rt <- abs(room_lr$Staffed.Rooms - room_ori$Staffed.Rooms)
+rt_rmse <- sqrt(mean((room_rt$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+rt_rmse
+```
+
+
+### 5.1.4 Use our predictive model and imputed data sets to predict staffed rooms, and compare their RMSE
+
+- Use the function to caculat RMSE use the dataset imputed by CI, LR, RT
+```{r}
+error_ci <- round(Caculate_Maxroom(real = "staffedrooms(ci).csv"), 3)
+error_lr <- round(Caculate_Maxroom(real = "staffedrooms(lr).csv"), 3)
+error_rt <- round(Caculate_Maxroom(real = "staffedrooms(rt).csv"), 3)
+error_del_15 <- Caculate_Maxroom(real = "staffedrooms(del_15).csv")
+rmse_15 <- data.frame(model_error_ci.lower, model_error_ci.upper, error_ci, error_lr,error_rt, error_del_15)
+```
+
+
+## 5.2 Now, we contruct dataset with 25% missing values
+
+- Create dataset with 25 percent of missing value
+```{r, echo=FALSE, warning=FALSE}
+dat <- dat_or
+dat_1 <- dat
+pointer_or <- which((is.na(dat_1$`Depart Summary`) & !is.na(dat_1$`Rooming Form`)) | ((is.na(dat_1$`Depart Summary`) & is.na(dat_1$`Rooming Form`) & !is.na(dat_1$`Check In Time`))))
+length(pointer_or)/nrow(dat_1)
+pointer <- as.integer(1 : nrow(dat_1))
+# case3 percentage
+case3_per <- nrow(dat[!is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+pointer_mis_case3 <- sample(pointer[-pointer_or], size = (mp$`25 percent`[1]/100 - case3_per) * nrow(dat))
+mis_data <- dat
+mis_data$`Depart Summary`[pointer_mis_case3] <- NA
+# case4.1 percentage
+case4.1_per <- nrow(dat[is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+pointer_mis_case4.1 <- sample(pointer[-pointer_mis_case3][-pointer_or], size = (mp$`25 percent`[2]/100 - case4.1_per)* nrow(dat))
+##why length(pointer[-pointer_mis_case3][-pointer_or]) !=
+## length(pointer) - length(pointer_mis_case3) - ##length(pointer_or) and intersect(pointer_or, pointer_mis_case3) = 0, intersect(pointer_mis_case4.1, pointer_mis_case3) = 0,
+##length(pointer_or)+length(pointer_mis_case3) + length(pointer_mis_case4.1) = nrow(dat)*0.25
+mis_data$`Rooming Form`[pointer_mis_case4.1] <- NA
+mis_data$`Depart Summary`[pointer_mis_case4.1] <- NA
+##validate the percentage of missing value
+nrow(mis_data[!is.na(mis_data$`Rooming Form`) & is.na(mis_data$`Depart Summary`),])/nrow(mis_data) + nrow(mis_data[is.na(mis_data$`Rooming Form`) & is.na(mis_data$`Depart Summary`) & !is.na(mis_data$`Check In Time`),])/nrow(mis_data)
+## Percentage of case3 should be 9.5, but here is 9.14. Percentage of case4.1 should be 15.5 but here is 14.9
+## Why there is only 24.1% missing data?
+```
+
+### 5.2.1 Impute the dataset using conditional imputation
+
+```{r, echo=FALSE, warning=FALSE}
+mis_data_ci <- mis_data
+# declare start of appointment
+mis_data_ci$startOfAppt <- mis_data_ci$`Rooming Form`
+
+# format check in time to match rooming form
+##mis_data_ci$`Check In Time` <- sub("([0-9])([A-Z])", "\\1 \\2", mis_data_ci$`Check In Time`)
+mis_data_ci$`Check In Time` <- as.POSIXct(mis_data_ci$`Check In Time`, format = "%m/%d/%Y %I:%M %p")
+# format check out time to match rooming form
+##mis_data_ci$`Check Out Time` <- sub("([0-9])([A-Z])", "\\1 \\2", mis_data_ci$`Check Out Time`)
+mis_data_ci$`Check Out Time` <- as.POSIXct(mis_data_ci$`Check Out Time`, format = "%m/%d/%Y %I:%M %p")
+
+# (case 4.1) use check in time + delay when rooming form not available
+for (i in 1:nrow(mis_data_ci)) {
+  if(is.na(mis_data_ci$startOfAppt[i])) {
+    mis_data_ci$startOfAppt[i] <- mis_data_ci$`Check In Time`[i] + checkInDelay*secInMin
+  }
+}
+
+# declare end of appointment
+mis_data_ci$endOfAppt <- mis_data_ci$`Depart Summary`
+
+# find average time in room for different appointment lengths
+# calculate length of stay and only use valid lengths
+mis_data_ci$LOS <- as.numeric(difftime(mis_data_ci$endOfAppt, mis_data_ci$startOfAppt, units = "mins"))
+mis_data_ci <- mis_data_ci[(mis_data_ci$LOS>minApptLength &
+             mis_data_ci$LOS<maxApptLength)|
+             is.na(mis_data_ci$LOS),]
+nrow(mis_data_ci[mis_data_ci$LOS<minApptLength | mis_data_ci$LOS > maxApptLength,])
+### should we use the average length to replace the invalid lengths not just delete them?
+
+# find averages for each appointment length
+# find averages for each appointment length
+losAvg1 <- mis_data_ci %>% dplyr::group_by(`Appt Length`) %>%
+            dplyr::summarise(Mean=round(mean(LOS, na.rm = TRUE)),
+                      Stdev=round(sd(LOS, na.rm = TRUE)),
+                      N = n_distinct(`Check In Time`) )
+#losAvg1 <- losAvg1[losAvg1$N >= minN & !is.na(losAvg1$`Appt Length`),]
+
+# (case 3): use start of appointment + estimated time in room when depart summary not available
+for (i in 1:nrow(mis_data_ci)) {
+  if (is.na(mis_data_ci$endOfAppt[i])&
+      !is.na(mis_data_ci$startOfAppt[i])) {
+    for (j in 1:nrow(losAvg1)) {
+      if (mis_data_ci$`Appt Length`[i] == losAvg1$`Appt Length`[j]) {
+        mis_data_ci$LOS[i] <- losAvg1$Mean[j]
+      }
+    }
+    mis_data_ci$endOfAppt[i] <- mis_data_ci$startOfAppt[i] + mis_data_ci$LOS[i]*secInMin
+  }
+}
+sum(is.na(mis_data_ci$endOfAppt))
+mis_data_ci <- mis_data_ci[!is.na(mis_data_ci$endOfAppt),]
+sum(is.na(mis_data_ci$endOfAppt))
+# add allowance for end of appointment
+mis_data_ci$endOfAppt<- mis_data_ci$endOfAppt + 10*60
+
+#Reclassify morning patients as afternoon if entered room after 12:00PM, reclassify afternoon patients as morning if entered exam room before 12:00 PM
+for (i in 1:nrow(mis_data_ci))
+{
+  if(hour(mis_data_ci$startOfAppt[i])>=12)
+  {mis_data_ci$`Morning/Afternoon`[i] <- "PM - AFTERNOON"}
+  else if (hour(mis_data_ci$startOfAppt[i])<12)
+  {mis_data_ci$`Morning/Afternoon`[i] <- "AM - MORNING"}
+}
+mis_data_ci <- mis_data_ci[order(mis_data_ci$`Appt Date`, mis_data_ci$`Morning/Afternoon`, mis_data_ci$startOfAppt),]
+mis_data_ci <- mis_data_ci[!is.na(mis_data_ci$endOfAppt),]## why there are missing values here
+sum(is.na(mis_data_ci$startOfAppt))
+sum(is.na(mis_data_ci$endOfAppt))
+```
+
+#### 5.2.1.2 Use new imputated dataset to caculate Maxroom
+
+```{r, echo=FALSE, warning=FALSE}
+library(plyr)
+library(knitr)
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(count(mis_data_ci$`Appt Date`)$freq), sum(count(unique(mis_data_ci$Session))$freq))
+colnames(rooms) <- unique(mis_data_ci$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(mis_data_ci)){
+  if ((mis_data_ci$`Appt Date`[z] == mis_data_ci$`Appt Date`[z-1]) & 
+      (mis_data_ci$`Morning/Afternoon`[z] == mis_data_ci$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (mis_data_ci$endOfAppt[k] > mis_data_ci$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(mis_data_ci)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (mis_data_ci$`Appt Date`[z] != mis_data_ci$`Appt Date`[z-1] |
+           mis_data_ci$`Morning/Afternoon`[z] != mis_data_ci$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+maxrooms.df$Number.Patients <- count(mis_data_ci$Session)$freq
+##kable(maxrooms.df[,c(1:2)], format = "markdown")
+# prep data to be joined with rent grid
+maxrooms.df$Date <- gsub("\\ .*","",maxrooms.df$Session)
+maxrooms.df$Date <- as.POSIXct(maxrooms.df$Date, format = "%Y-%m-%d")
+
+maxrooms.df$`Morning/Afternoon` <- gsub(".* ", "", maxrooms.df$Session)
+maxrooms.df$`Day of Week` <- weekdays(maxrooms.df$Date, abbreviate = TRUE)
+maxrooms.df$Day.of.Month <- as.numeric(format(maxrooms.df$Date, "%d"))
+
+# add week number to staffed room data
+for (j in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$Day.of.Month[j]<=7) {
+    maxrooms.df$`Week Number`[j] <- 1
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=14) {
+    maxrooms.df$`Week Number`[j] <- 2
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=21) {
+    maxrooms.df$`Week Number`[j] <- 3
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=28) {
+    maxrooms.df$`Week Number`[j] <- 4
+  }
+  else {
+    maxrooms.df$`Week Number`[j] <- 5
+  }
+}
+
+# Time of day
+for (i in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$`Morning/Afternoon`[i] == "MORNING") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "AM"
+  }
+  else if (maxrooms.df$`Morning/Afternoon` [i] == "AFTERNOON") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "PM"
+  }
+}
+maxrooms.df$Staffed.Rooms <- maxrooms.df$maxrooms
+maxrooms.df$maxrooms <- NULL
+colnames(maxrooms.df)[colnames(maxrooms.df)=="Date"] <- "Appt Date"
+maxrooms.df$`Morning/Afternoon` <- ifelse(maxrooms.df$`Morning/Afternoon`=="AM", "AM - MORNING", "PM - AFTERNOON")
+
+write.csv(maxrooms.df, file = "staffedrooms(ci_25).csv", row.names = FALSE)
+detach(package:plyr)
+
+##ci <- Caculate_Maxroom(mis_data_ci)
+```
+
+#### 5.2.1.3 Compare the staffedrooms(ci_25) with staffedrooms(ori)
+
+```{r}
+room_ci_25 <- read.csv("staffedrooms(ci_25).csv")
+room_ori <- read.csv("staffedrooms(ori).csv")
+#diff_ci_25 <- abs(room_ci_25$Staffed.Rooms - room_ori$Staffed.Rooms)
+ci_rmse_25 <- sqrt(mean((room_ci_25$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+ci_rmse_25
+```
+
+#### 5.2.1.4 caculate the staffed room using data set which deletes all the missing value
+```{r, echo=FALSE, warning=FALSE}
+mis_data_del <- mis_data
+del_25 <- mis_data_del[!is.na(mis_data$`Rooming Form`) & !is.na(mis_data$`Depart Summary`),]
+staffed_del_25 <- Caculate_staff(del_25)
+write.csv(staffed_del_25, file = "staffedrooms(del_25).csv", row.names = FALSE)
+room_del_25 <- read.csv("staffedrooms(del_25).csv")
+room_ori <- read.csv("staffedrooms(ori).csv")
+## Find out sessions don't contained in del data set, set staffed room to 0
+diff_session <- room_ori[!(room_ori$Session %in% room_del_25$Session),]
+room_del_25 <- rbind(room_del_25, setNames(room_ori[!(room_ori$Session %in% room_del_25$Session),], names(room_del_25)))
+#set staffed room to 0
+room_del_25[room_del_25$Session %in% diff_session$Session,]$Staffed.Rooms <- 0
+# Order data by Session
+room_del_25$Session <- as.POSIXct(room_del_25$Session)
+room_del_25 <- room_del_25[order(room_del_25$Session, room_del_25$Morning.Afternoon),]
+diff_del_25 <- abs(room_del_25$Staffed.Rooms - room_ori$Staffed.Rooms)
+del_25_rmse <- sqrt(mean((room_del_25$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+del_25_rmse
+```
+
+### 5.2.2 Impute the dataset using linear regression
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+#Build linear regression model for LOW  to deal with missing values in Rooming Form
+dat_lr <- mis_data
+dat_lr <- dat_lr[!is.na(dat_lr$`Check In Time`),]
+# Since many of the columns are related to geographic positions of the patients, I'd like to change all these independent variables into Distance between patients and clinic.
+#my_distance <- read.csv(file.path(datadirectory,"swpazctadistance.csv"))
+#colnames(my_distance) = my_distance[1,]
+#rownames(my_distance) = my_distance[,2]
+#my_distance <- my_distance[-1,-1]
+#chp_distance <- data.frame(my_distance[,c(1,83)])
+#colnames(chp_distance) <- c("Zip Code","chp_distance")
+#dat_lr <- merge(dat_lr,chp_distance,by=c("Zip Code"="Zip Code"))
+## There're strange distance value in the previous step which are caused by origianal distance dataset. I'm afraid this will cause error in linear regression model and the merge will reduce the rows of the data set
+dat_lr <- dat_lr[, !names(dat_lr) %in% c("City","State" ,"Zip Code")]
+dat_lr$LOW <- as.numeric(difftime(dat_lr$startOfAppt, dat_lr$`Check In Time`, units = "mins"))
+#Choose useful predictors and change the attributes of different independent variables for the sake of linear regression
+dat_lr <- dat_lr[, names(dat_lr) %in% c("Appt Date", "Appt Length", "Day of Week", "Provider", "Appt Time", "Morning/Afternoon", "Pat Sex","Age", "Appt Type", "chp_distance", "Check In Time", "Rooming Form", "Depart Summary","LOW", "startOfAppt", "endOfAppt", "LOS", "Session")]
+dat_lr$`Day of Week` <- as.factor(dat_lr$`Day of Week`)
+dat_lr$Provider <- as.factor(dat_lr$Provider)
+##dat_lr$`Appt Time` <- as.POSIXct(dat_lr$`Appt Time`, format = "%H:%M")
+##dat_lr$`Appt Time` <- format(dat_lr$`Appt Time`, format="%H:%M")
+## the code above automatically using today's date. It's too hard to convert colname Appt Time into POSIXct format without date. I suspect this will influence the result. I decide to change it to number
+dat_lr$`Appt Length` <- scale(dat_lr$`Appt Length`)
+dat_lr$hour <- hour(hm(dat_lr$`Appt Time`))
+dat_lr$minut <- minute(hm(dat_lr$`Appt Time`))
+dat_lr$appt_time <- 60*dat_lr$hour+dat_lr$minut
+dat_lr$appt_time <- scale(dat_lr$appt_time)
+dat_lr$`Morning/Afternoon` <- as.factor(dat_lr$`Morning/Afternoon`)
+dat_lr$`Pat Sex` <- as.factor(dat_lr$`Pat Sex`)
+dat_lr$`Appt Type` <- as.factor(dat_lr$`Appt Type`)
+dat_lr$Age <- scale(dat_lr$Age)
+#dat_lr$chp_distance <- scale(dat_lr$chp_distance)
+#Create training data and test data
+dat_lr_train <- dat_lr[!is.na(dat_lr$`Rooming Form`),]
+dat_lr_test <- dat_lr[is.na(dat_lr$`Rooming Form`),]
+LOW_lm <- lm(LOW ~ `Appt Date` + `Day of Week` + `Appt Length` + Provider + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_lr_train)
+summary(LOW_lm)
+## Since there are too many factors in the data set the result is very bad, I need to reduce predictors. I decide to eliminate columns which mostly have p-value bigger than 0.05
+LOW_lm_1 <- lm(LOW ~ appt_time + `Morning/Afternoon`, data = dat_lr_train)
+summary(LOW_lm_1)
+## The R-squared is very low. While P-values suggest that there are relation ships between LOW and appt_time + `Morning/Afternoon`, maybe I can try other nonlinear regression later.
+## Now use the model to predict missing values in Rooming Form
+LOW_pre <- predict(LOW_lm_1, dat_lr_test)
+## impute missing values in Rooming Form
+dat_lr_test$LOW <- LOW_pre
+dat_lr_test$`Rooming Form` <- dat_lr_test$`Check In Time` + dat_lr_test$LOW * 60
+dat_lr_test$startOfAppt <- dat_lr_test$`Rooming Form`
+dat_lr_2 <- rbind(dat_lr_test, dat_lr_train)
+sum(is.na(dat_lr_2$`Rooming Form`))
+## Now we use linear regression to predict LOS, then use Depart Summary = Rooming Form + LOS, endOfAppt = Depart Summary + 10*60 to calculate the time when patients live the room
+dat_lr_2_train <- dat_lr_2[!is.na(dat_lr_2$`Depart Summary`),]
+dat_lr_2_test <- dat_lr_2[is.na(dat_lr_2$`Depart Summary`),]
+LOS_lm_2_1 <- lm(LOS ~ `Appt Date` + `Day of Week` + `Appt Length` + Provider + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_lr_2_train)
+summary(LOS_lm_2_1)
+## R square is very low. I decide to get rid of all the factors which have high p-value
+LOS_lm_2_2 <- lm(LOS ~`Appt Length` + `Appt Type`, data = dat_lr_2_train)
+summary(LOS_lm_2_2)
+##impute missing values in Depart Summary
+LOS_pre <- predict(LOS_lm_2_2, dat_lr_2_test)
+dat_lr_2_test$LOS <- LOS_pre
+dat_lr_2_test$`Depart Summary` <- dat_lr_2_test$`Rooming Form` + dat_lr_2_test$LOS*60
+dat_lr_2_test$endOfAppt <- dat_lr_2_test$`Depart Summary` + 10*60
+dat_lr_2 <- rbind(dat_lr_2_train, dat_lr_2_test)
+sum(is.na(dat_lr_2$`Depart Summary`))
+```
+
+#### 5.2.2.2 Since we have already imputed all the missing values, let us use it to calculate staffed rooms
+```{r, echo=FALSE, warning=FALSE}
+# order data chronologically
+dat_lr_2 <- dat_lr_2[order(dat_lr_2$`Appt Date`, dat_lr_2$`Morning/Afternoon`, dat_lr_2$startOfAppt),]
+library(plyr)
+library(knitr)
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(count(dat_lr_2$`Appt Date`)$freq), sum(count(unique(dat_lr_2$Session))$freq))
+colnames(rooms) <- unique(dat_lr_2$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(dat_lr_2)){
+  if ((dat_lr_2$`Appt Date`[z] == dat_lr_2$`Appt Date`[z-1]) & 
+      (dat_lr_2$`Morning/Afternoon`[z] == dat_lr_2$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (dat_lr_2$endOfAppt[k] > dat_lr_2$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(dat_lr_2)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (dat_lr_2$`Appt Date`[z] != dat_lr_2$`Appt Date`[z-1] |
+           dat_lr_2$`Morning/Afternoon`[z] != dat_lr_2$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+maxrooms.df$Number.Patients <- count(dat_lr_2$Session)$freq
+##kable(maxrooms.df[,c(1:2)], format = "markdown")
+# prep data to be joined with rent grid
+maxrooms.df$Date <- gsub("\\ .*","",maxrooms.df$Session)
+maxrooms.df$Date <- as.POSIXct(maxrooms.df$Date, format = "%Y-%m-%d")
+
+maxrooms.df$`Morning/Afternoon` <- gsub(".* ", "", maxrooms.df$Session)
+maxrooms.df$`Day of Week` <- weekdays(maxrooms.df$Date, abbreviate = TRUE)
+maxrooms.df$Day.of.Month <- as.numeric(format(maxrooms.df$Date, "%d"))
+
+# add week number to staffed room data
+for (j in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$Day.of.Month[j]<=7) {
+    maxrooms.df$`Week Number`[j] <- 1
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=14) {
+    maxrooms.df$`Week Number`[j] <- 2
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=21) {
+    maxrooms.df$`Week Number`[j] <- 3
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=28) {
+    maxrooms.df$`Week Number`[j] <- 4
+  }
+  else {
+    maxrooms.df$`Week Number`[j] <- 5
+  }
+}
+
+# Time of day
+for (i in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$`Morning/Afternoon`[i] == "MORNING") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "AM"
+  }
+  else if (maxrooms.df$`Morning/Afternoon` [i] == "AFTERNOON") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "PM"
+  }
+}
+maxrooms.df$Staffed.Rooms <- maxrooms.df$maxrooms
+maxrooms.df$maxrooms <- NULL
+colnames(maxrooms.df)[colnames(maxrooms.df)=="Date"] <- "Appt Date"
+maxrooms.df$`Morning/Afternoon` <- ifelse(maxrooms.df$`Morning/Afternoon`=="AM", "AM - MORNING", "PM - AFTERNOON")
+
+write.csv(maxrooms.df, file = "staffedrooms(lr_25).csv", row.names = FALSE)
+detach(package:plyr)
+room_lr_25 <- read.csv("staffedrooms(lr_25).csv")
+diff_lr_25 <- abs(room_lr$Staffed.Rooms - room_ori$Staffed.Rooms)
+lr_rmse_25 <- sqrt(mean((room_lr_25$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+lr_rmse_25
+```
+
+### 5.2.3 Since there are many categorical predictors in the data set. linear regression seems to be bad in this situation. I decide to use regression tree to estimate LOS and LOW. Then use it to calculate staffed rooms.
+
+```{r, echo=FALSE, warning=FALSE}
+dat_rt <- mis_data
+dat_rt <- dat_rt[, !names(dat_rt) %in% c("City","State" ,"Zip Code")]
+## When Check In Time is NA, delete it(in order to be accord with previous work: line 145)
+dat_rt <- dat_rt[!is.na(dat_rt$`Check In Time`),]
+dat_rt_test <- dat_rt[is.na(dat_rt$`Rooming Form`),]
+dat_rt$LOW <- as.numeric(difftime(dat_rt$startOfAppt, dat_rt$`Check In Time`, units = "mins"))
+dat_rt <- dat_rt[, names(dat_rt) %in% c("Appt Date", "Appt Length", "Day of Week", "Provider", "Appt Time", "Morning/Afternoon", "Pat Sex","Age", "Appt Type", "chp_distance", "Check In Time", "Rooming Form", "Depart Summary","LOW", "startOfAppt", "endOfAppt", "LOS", "Session")]
+dat_rt$`Day of Week` <- as.factor(dat_rt$`Day of Week`)
+dat_rt$Provider <- as.factor(dat_rt$Provider)
+dat_rt$hour <- hour(hm(dat_rt$`Appt Time`))
+dat_rt$minut <- minute(hm(dat_rt$`Appt Time`))
+dat_rt$appt_time <- 60*dat_rt$hour+dat_rt$minut
+dat_rt$`Morning/Afternoon` <- as.factor(dat_rt$`Morning/Afternoon`)
+dat_rt$`Pat Sex` <- as.factor(dat_rt$`Pat Sex`)
+dat_rt$`Appt Type` <- as.factor(dat_rt$`Appt Type`)
+## Use random forest to estimate LOW
+dat_rt_train <-as.data.frame(dat_rt[!is.na(dat_rt$`Rooming Form`),])
+dat_rt_test <- as.data.frame(dat_rt[is.na(dat_rt$`Rooming Form`),])
+#names(dat_rt_train) <- make.names(names(dat_rt_train))
+#names(dat_rt_test) <- make.names(names(dat_rt_test))
+library(rpart)
+rt_1 <- rpart(LOW ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt_train)
+#library(caret)
+#rt_1 <- train(x = dat_rt_train[, which(names(dat_rt_train) %in% c("Appt Date" ,"Day of Week","Appt Length", "appt_time", "Morning/Afternoon", "Pat Sex", "Age" ,"Appt Type"))], y = dat_rt_train$LOW, method = "rpart2", tuneLength = 5, trControl = trainControl(method = "cv"))
+##rt_1 <- randomForest(LOW ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt_train, ntree = 1000)
+## impute missing values in Rooming Form
+LOW_pre_rt <- predict(rt_1, dat_rt_test)
+dat_rt_test$LOW <- LOW_pre_rt
+dat_rt_test$`Rooming Form` <- dat_rt_test$`Check In Time` + dat_rt_test$LOW * 60
+dat_rt_test$startOfAppt <- dat_rt_test$`Rooming Form`
+dat_rt_2 <- rbind(dat_rt_test, dat_rt_train)
+sum(is.na(dat_rt_2$`Rooming Form`))
+## Use random forest to estimate LOS
+dat_rt2_train <-dat_rt_2[!is.na(dat_rt_2$`Depart Summary`),]
+dat_rt2_test <- dat_rt_2[is.na(dat_rt_2$`Depart Summary`),]
+rt_2 <- rpart(LOS ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt2_train)
+## impute missing values in Depart Summary
+LOS_pre_rt <- predict(rt_2, dat_rt2_test)
+dat_rt2_test$LOS <- LOS_pre_rt
+dat_rt2_test$`Depart Summary` <- dat_rt2_test$startOfAppt + dat_rt2_test$LOS*60
+dat_rt2_test$endOfAppt <- dat_rt2_test$`Depart Summary` + 10*60
+dat_rt_3 <- rbind(dat_rt2_test, dat_rt2_train)
+sum(is.na(dat_rt_3$`Depart Summary`))
+```
+
+#### 5.2.3.2 Now we can use the imputed dataset to calculate staffed rooms
+```{r, echo=FALSE, warning=FALSE}
+# order data chronologically
+dat_rt_3 <- dat_rt_3[order(dat_rt_3$`Appt Date`, dat_rt_3$`Morning/Afternoon`, dat_rt_3$startOfAppt),]
+library(plyr)
+library(knitr)
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(count(dat_rt_3$`Appt Date`)$freq), sum(count(unique(dat_rt_3$Session))$freq))
+colnames(rooms) <- unique(dat_rt_3$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(dat_rt_3)){
+  if ((dat_rt_3$`Appt Date`[z] == dat_rt_3$`Appt Date`[z-1]) & 
+      (dat_rt_3$`Morning/Afternoon`[z] == dat_rt_3$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (dat_rt_3$endOfAppt[k] > dat_rt_3$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(dat_rt_3)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (dat_rt_3$`Appt Date`[z] != dat_rt_3$`Appt Date`[z-1] |
+           dat_rt_3$`Morning/Afternoon`[z] != dat_rt_3$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+maxrooms.df$Number.Patients <- count(dat_rt_3$Session)$freq
+##kable(maxrooms.df[,c(1:2)], format = "markdown")
+# prep data to be joined with rent grid
+maxrooms.df$Date <- gsub("\\ .*","",maxrooms.df$Session)
+maxrooms.df$Date <- as.POSIXct(maxrooms.df$Date, format = "%Y-%m-%d")
+
+maxrooms.df$`Morning/Afternoon` <- gsub(".* ", "", maxrooms.df$Session)
+maxrooms.df$`Day of Week` <- weekdays(maxrooms.df$Date, abbreviate = TRUE)
+maxrooms.df$Day.of.Month <- as.numeric(format(maxrooms.df$Date, "%d"))
+
+# add week number to staffed room data
+for (j in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$Day.of.Month[j]<=7) {
+    maxrooms.df$`Week Number`[j] <- 1
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=14) {
+    maxrooms.df$`Week Number`[j] <- 2
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=21) {
+    maxrooms.df$`Week Number`[j] <- 3
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=28) {
+    maxrooms.df$`Week Number`[j] <- 4
+  }
+  else {
+    maxrooms.df$`Week Number`[j] <- 5
+  }
+}
+
+# Time of day
+for (i in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$`Morning/Afternoon`[i] == "MORNING") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "AM"
+  }
+  else if (maxrooms.df$`Morning/Afternoon` [i] == "AFTERNOON") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "PM"
+  }
+}
+maxrooms.df$Staffed.Rooms <- maxrooms.df$maxrooms
+maxrooms.df$maxrooms <- NULL
+colnames(maxrooms.df)[colnames(maxrooms.df)=="Date"] <- "Appt Date"
+maxrooms.df$`Morning/Afternoon` <- ifelse(maxrooms.df$`Morning/Afternoon`=="AM", "AM - MORNING", "PM - AFTERNOON")
+
+write.csv(maxrooms.df, file = "staffedrooms(rt_25).csv", row.names = FALSE)
+detach(package:plyr)
+room_rt_25 <- read.csv("staffedrooms(rt_25).csv")
+diff_rt_25 <- abs(room_lr$Staffed.Rooms - room_ori$Staffed.Rooms)
+rt_rmse_25 <- sqrt(mean((room_rt_25$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+rt_rmse_25
+```
+
+### 5.2.4 use the function to caculat RMSE use the dataset imputed by CI, LR, RT
+```{r, echo=FALSE, warning=FALSE}
+error_ci_25 <- Caculate_Maxroom(real = "staffedrooms(ci_25).csv")
+error_lr_25 <- Caculate_Maxroom(real = "staffedrooms(lr_25).csv")
+error_rt_25 <- Caculate_Maxroom(real = "staffedrooms(rt_25).csv")
+error_del_25 <- Caculate_Maxroom(real = "staffedrooms(del_25).csv")
+rmse_25 <- data.frame(model_error_ci.lower, model_error_ci.upper, error_ci_25, error_lr_25, error_rt_25,error_del_25)
+```
+
+
+## 5.3 Now, we construct dataset with 35% missing values
+
+- Create dataset with 35 percent of missing value
+```{r}
+dat_1 <- dat_or
+pointer_or <- which((is.na(dat_1$`Depart Summary`) & !is.na(dat_1$`Rooming Form`)) | ((is.na(dat_1$`Depart Summary`) & is.na(dat_1$`Rooming Form`) & !is.na(dat_1$`Check In Time`))))
+length(pointer_or)/nrow(dat_1)
+pointer <- as.integer(1 : nrow(dat_1))
+# case3 percentage
+case3_per <- nrow(dat[!is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+pointer_mis_case3 <- sample(pointer[-pointer_or], size = (mp$`35 percent`[1]/100 - case3_per) * nrow(dat))
+mis_data <- dat
+mis_data$`Depart Summary`[pointer_mis_case3] <- NA
+# case4.1 percentage
+case4.1_per <- nrow(dat[is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+pointer_mis_case4.1 <- sample(pointer[-pointer_mis_case3][-pointer_or], size = (mp$`35 percent`[2]/100 - case4.1_per)* nrow(dat))
+##why length(pointer[-pointer_mis_case3][-pointer_or]) !=
+## length(pointer) - length(pointer_mis_case3) - ##length(pointer_or) and intersect(pointer_or, pointer_mis_case3) = 0, intersect(pointer_mis_case4.1, pointer_mis_case3) = 0,
+##length(pointer_or)+length(pointer_mis_case3) + length(pointer_mis_case4.1) = nrow(dat)*0.35
+mis_data$`Rooming Form`[pointer_mis_case4.1] <- NA
+mis_data$`Depart Summary`[pointer_mis_case4.1] <- NA
+##validate the percentage of missing value
+nrow(mis_data[!is.na(mis_data$`Rooming Form`) & is.na(mis_data$`Depart Summary`),])/nrow(mis_data) + nrow(mis_data[is.na(mis_data$`Rooming Form`) & is.na(mis_data$`Depart Summary`) & !is.na(mis_data$`Check In Time`),])/nrow(mis_data)
+## Percentage of case3 should be 13.3, but here is 12.7. Percentage of case4.1 should be 21.7 but here is 20.6
+#sum(is.na(dat$`Check In Time`)) = 0
+## Why there is only 33.6% missing data?
+```
+
+### 5.3.1 caculate the staffed room using data set which deletes all the missing value
+```{r, echo=FALSE, warning=FALSE}
+mis_data_del <- mis_data
+del_35 <- mis_data_del[!is.na(mis_data$`Rooming Form`) & !is.na(mis_data$`Depart Summary`),]
+staffed_del_35 <- Caculate_staff(del_35)
+write.csv(staffed_del_35, file = "staffedrooms(del_35).csv", row.names = FALSE)
+room_del_35 <- read.csv("staffedrooms(del_35).csv")
+room_ori <- read.csv("staffedrooms(ori).csv")
+## Find out sessions don't contained in del data set, set staffed room to 0
+diff_session <- room_ori[!(room_ori$Session %in% room_del_35$Session),]
+room_del_35 <- rbind(room_del_35, setNames(room_ori[!(room_ori$Session %in% room_del_35$Session),], names(room_del_35)))
+#set staffed room to 0
+room_del_35[room_del_35$Session %in% diff_session$Session,]$Staffed.Rooms <- 0
+# Order data by Session
+room_del_35$Session <- as.POSIXct(room_del_35$Session)
+room_del_35 <- room_del_35[order(room_del_35$Session, room_del_35$Morning.Afternoon),]
+diff_del_35 <- abs(room_del_35$Staffed.Rooms - room_ori$Staffed.Rooms)
+del_35_rmse <- sqrt(mean((room_del_35$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+del_35_rmse
+```
+
+### 5.3.2 Impute the dataset using conditional imputation
+
+```{r, echo=FALSE, warning=FALSE}
+mis_data_ci <- mis_data
+# declare start of appointment
+mis_data_ci$startOfAppt <- mis_data_ci$`Rooming Form`
+
+# format check in time to match rooming form
+##mis_data_ci$`Check In Time` <- sub("([0-9])([A-Z])", "\\1 \\2", mis_data_ci$`Check In Time`)
+mis_data_ci$`Check In Time` <- as.POSIXct(mis_data_ci$`Check In Time`, format = "%m/%d/%Y %I:%M %p")
+# format check out time to match rooming form
+##mis_data_ci$`Check Out Time` <- sub("([0-9])([A-Z])", "\\1 \\2", mis_data_ci$`Check Out Time`)
+mis_data_ci$`Check Out Time` <- as.POSIXct(mis_data_ci$`Check Out Time`, format = "%m/%d/%Y %I:%M %p")
+
+# (case 4.1) use check in time + delay when rooming form not available
+for (i in 1:nrow(mis_data_ci)) {
+  if(is.na(mis_data_ci$startOfAppt[i])) {
+    mis_data_ci$startOfAppt[i] <- mis_data_ci$`Check In Time`[i] + checkInDelay*secInMin
+  }
+}
+
+# declare end of appointment
+mis_data_ci$endOfAppt <- mis_data_ci$`Depart Summary`
+
+# find average time in room for different appointment lengths
+# calculate length of stay and only use valid lengths
+mis_data_ci$LOS <- as.numeric(difftime(mis_data_ci$endOfAppt, mis_data_ci$startOfAppt, units = "mins"))
+mis_data_ci <- mis_data_ci[(mis_data_ci$LOS>minApptLength &
+             mis_data_ci$LOS<maxApptLength)|
+             is.na(mis_data_ci$LOS),]
+nrow(mis_data_ci[mis_data_ci$LOS<minApptLength | mis_data_ci$LOS > maxApptLength,])
+### should we use the average length to replace the invalid lengths not just delete them?
+
+# find averages for each appointment length
+# find averages for each appointment length
+losAvg1 <- mis_data_ci %>% dplyr::group_by(`Appt Length`) %>%
+            dplyr::summarise(Mean=round(mean(LOS, na.rm = TRUE)),
+                      Stdev=round(sd(LOS, na.rm = TRUE)),
+                      N = n_distinct(`Check In Time`) )
+#losAvg1 <- losAvg1[losAvg1$N >= minN & !is.na(losAvg1$`Appt Length`),]
+
+# (case 3): use start of appointment + estimated time in room when depart summary not available
+for (i in 1:nrow(mis_data_ci)) {
+  if (is.na(mis_data_ci$endOfAppt[i])&
+      !is.na(mis_data_ci$startOfAppt[i])) {
+    for (j in 1:nrow(losAvg1)) {
+      if (mis_data_ci$`Appt Length`[i] == losAvg1$`Appt Length`[j]) {
+        mis_data_ci$LOS[i] <- losAvg1$Mean[j]
+      }
+    }
+    mis_data_ci$endOfAppt[i] <- mis_data_ci$startOfAppt[i] + mis_data_ci$LOS[i]*secInMin
+  }
+}
+sum(is.na(mis_data_ci$endOfAppt))
+# add allowance for end of appointment
+mis_data_ci$endOfAppt<- mis_data_ci$endOfAppt + 10*60
+
+#Reclassify morning patients as afternoon if entered room after 12:00PM, reclassify afternoon patients as morning if entered exam room before 12:00 PM
+for (i in 1:nrow(mis_data_ci))
+{
+  if(hour(mis_data_ci$startOfAppt[i])>=12)
+  {mis_data_ci$`Morning/Afternoon`[i] <- "PM - AFTERNOON"}
+  else if (hour(mis_data_ci$startOfAppt[i])<12)
+  {mis_data_ci$`Morning/Afternoon`[i] <- "AM - MORNING"}
+}
+mis_data_ci <- mis_data_ci[order(mis_data_ci$`Appt Date`, mis_data_ci$`Morning/Afternoon`, mis_data_ci$startOfAppt),]
+mis_data_ci <- mis_data_ci[!is.na(mis_data_ci$endOfAppt),]## why there are missing values here
+sum(is.na(mis_data_ci$startOfAppt))
+sum(is.na(mis_data_ci$endOfAppt))
+```
+
+#### 5.3.2.2 Use new imputated dataset to caculate Maxroom
+
+```{r, echo=FALSE, warning=FALSE}
+library(plyr)
+library(knitr)
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(count(mis_data_ci$`Appt Date`)$freq), sum(count(unique(mis_data_ci$Session))$freq))
+colnames(rooms) <- unique(mis_data_ci$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(mis_data_ci)){
+  if ((mis_data_ci$`Appt Date`[z] == mis_data_ci$`Appt Date`[z-1]) & 
+      (mis_data_ci$`Morning/Afternoon`[z] == mis_data_ci$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (mis_data_ci$endOfAppt[k] > mis_data_ci$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(mis_data_ci)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (mis_data_ci$`Appt Date`[z] != mis_data_ci$`Appt Date`[z-1] |
+           mis_data_ci$`Morning/Afternoon`[z] != mis_data_ci$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+maxrooms.df$Number.Patients <- count(mis_data_ci$Session)$freq
+##kable(maxrooms.df[,c(1:2)], format = "markdown")
+# prep data to be joined with rent grid
+maxrooms.df$Date <- gsub("\\ .*","",maxrooms.df$Session)
+maxrooms.df$Date <- as.POSIXct(maxrooms.df$Date, format = "%Y-%m-%d")
+
+maxrooms.df$`Morning/Afternoon` <- gsub(".* ", "", maxrooms.df$Session)
+maxrooms.df$`Day of Week` <- weekdays(maxrooms.df$Date, abbreviate = TRUE)
+maxrooms.df$Day.of.Month <- as.numeric(format(maxrooms.df$Date, "%d"))
+
+# add week number to staffed room data
+for (j in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$Day.of.Month[j]<=7) {
+    maxrooms.df$`Week Number`[j] <- 1
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=14) {
+    maxrooms.df$`Week Number`[j] <- 2
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=21) {
+    maxrooms.df$`Week Number`[j] <- 3
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=28) {
+    maxrooms.df$`Week Number`[j] <- 4
+  }
+  else {
+    maxrooms.df$`Week Number`[j] <- 5
+  }
+}
+
+# Time of day
+for (i in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$`Morning/Afternoon`[i] == "MORNING") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "AM"
+  }
+  else if (maxrooms.df$`Morning/Afternoon` [i] == "AFTERNOON") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "PM"
+  }
+}
+maxrooms.df$Staffed.Rooms <- maxrooms.df$maxrooms
+maxrooms.df$maxrooms <- NULL
+colnames(maxrooms.df)[colnames(maxrooms.df)=="Date"] <- "Appt Date"
+maxrooms.df$`Morning/Afternoon` <- ifelse(maxrooms.df$`Morning/Afternoon`=="AM", "AM - MORNING", "PM - AFTERNOON")
+
+write.csv(maxrooms.df, file = "staffedrooms(ci_35).csv", row.names = FALSE)
+detach(package:plyr)
+
+##ci <- Caculate_Maxroom(mis_data_ci)
+```
+
+#### 5.3.2.3 Compare the staffedrooms(ci_35) with staffedrooms(ori)
+
+```{r, echo=FALSE, warning=FALSE}
+room_ci_35 <- read.csv("staffedrooms(ci_35).csv")
+room_ori <- read.csv("staffedrooms(ori).csv")
+#diff_ci_25 <- abs(room_ci_25$Staffed.Rooms - room_ori$Staffed.Rooms)
+ci_rmse_35 <- sqrt(mean((room_ci_35$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+ci_rmse_35
+```
+
+### 5.3.3 Impute the dataset using linear regression
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+#Build linear regression model for LOW  to deal with missing values in Rooming Form
+dat_lr <- mis_data
+# Since many of the columns are related to geographic positions of the patients, I'd like to change all these independent variables into Distance between patients and clinic.
+#my_distance <- read.csv(file.path(datadirectory,"swpazctadistance.csv"))
+#colnames(my_distance) = my_distance[1,]
+#rownames(my_distance) = my_distance[,2]
+#my_distance <- my_distance[-1,-1]
+#chp_distance <- data.frame(my_distance[,c(1,83)])
+#colnames(chp_distance) <- c("Zip Code","chp_distance")
+#dat_lr <- merge(dat_lr,chp_distance,by=c("Zip Code"="Zip Code"))
+## There're strange distance value in the previous step which are caused by origianal distance dataset. I'm afraid this will cause error in linear regression model and the merge will reduce the rows of the data set
+dat_lr <- dat_lr[, !names(dat_lr) %in% c("City","State" ,"Zip Code")]
+dat_lr$LOW <- as.numeric(difftime(dat_lr$startOfAppt, dat_lr$`Check In Time`, units = "mins"))
+#Choose useful predictors and change the attributes of different independent variables for the sake of linear regression
+dat_lr <- dat_lr[, names(dat_lr) %in% c("Appt Date", "Appt Length", "Day of Week", "Provider", "Appt Time", "Morning/Afternoon", "Pat Sex","Age", "Appt Type", "chp_distance", "Check In Time", "Rooming Form", "Depart Summary","LOW", "startOfAppt", "endOfAppt", "LOS", "Session")]
+dat_lr$`Day of Week` <- as.factor(dat_lr$`Day of Week`)
+dat_lr$Provider <- as.factor(dat_lr$Provider)
+##dat_lr$`Appt Time` <- as.POSIXct(dat_lr$`Appt Time`, format = "%H:%M")
+##dat_lr$`Appt Time` <- format(dat_lr$`Appt Time`, format="%H:%M")
+## the code above automatically using today's date. It's too hard to convert colname Appt Time into POSIXct format without date. I suspect this will influence the result. I decide to change it to number
+dat_lr$`Appt Length` <- scale(dat_lr$`Appt Length`)
+dat_lr$hour <- hour(hm(dat_lr$`Appt Time`))
+dat_lr$minut <- minute(hm(dat_lr$`Appt Time`))
+dat_lr$appt_time <- 60*dat_lr$hour+dat_lr$minut
+dat_lr$appt_time <- scale(dat_lr$appt_time)
+dat_lr$`Morning/Afternoon` <- as.factor(dat_lr$`Morning/Afternoon`)
+dat_lr$`Pat Sex` <- as.factor(dat_lr$`Pat Sex`)
+dat_lr$`Appt Type` <- as.factor(dat_lr$`Appt Type`)
+dat_lr$Age <- scale(dat_lr$Age)
+#dat_lr$chp_distance <- scale(dat_lr$chp_distance)
+#Create training data and test data
+dat_lr_train <- dat_lr[!is.na(dat_lr$`Rooming Form`),]
+dat_lr_test <- dat_lr[is.na(dat_lr$`Rooming Form`),]
+library(dplyr)
+#appt_type_level <- union(levels(dat_lr_train$`Appt Type`), levels(dat_lr_test$`Appt Type`))
+#dat_lr_train$`Appt Type` <- factor(dat_lr_train$`Appt Type`, levels = appt_type_level)
+#dat_lr_test$`Appt Type` <- factor(dat_lr_test$`Appt Type`, levels = appt_type_level)
+LOW_lm <- lm(LOW ~ `Appt Date` + `Day of Week` + `Appt Length` + Provider + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_lr_train)
+summary(LOW_lm)
+## Since there are too many factors in the data set the result is very bad, I need to reduce predictors. I decide to eliminate columns which mostly have p-value bigger than 0.05
+LOW_lm_1 <- lm(LOW ~ appt_time + `Morning/Afternoon`, data = dat_lr_train)
+summary(LOW_lm_1)
+## The R-squared is very low. While P-values suggest that there are relation ships between LOW and appt_time + `Morning/Afternoon`, maybe I can try other nonlinear regression later.
+## Now use the model to predict missing values in Rooming Form
+LOW_pre <- predict(LOW_lm_1, dat_lr_test)
+## impute missing values in Rooming Form
+dat_lr_test$LOW <- LOW_pre
+dat_lr_test$`Rooming Form` <- dat_lr_test$`Check In Time` + dat_lr_test$LOW * 60
+dat_lr_test$startOfAppt <- dat_lr_test$`Rooming Form`
+dat_lr_2 <- rbind(dat_lr_test, dat_lr_train)
+sum(is.na(dat_lr_2$`Rooming Form`))
+## Now we use linear regression to predict LOS, then use Depart Summary = Rooming Form + LOS, endOfAppt = Depart Summary + 10*60 to calculate the time when patients live the room
+dat_lr_2_train <- dat_lr_2[!is.na(dat_lr_2$`Depart Summary`),]
+dat_lr_2_test <- dat_lr_2[is.na(dat_lr_2$`Depart Summary`),]
+LOS_lm_2_1 <- lm(LOS ~ `Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_lr_2_train)
+summary(LOS_lm_2_1)
+## R square is very low. I decide to get rid of all the factors which have high p-value
+#LOS_lm_2_2 <- lm(LOS ~`Appt Length` + `Appt Type`, data = dat_lr_2_train)
+#summary(LOS_lm_2_2)
+##impute missing values in Depart Summary
+LOS_lm_2_1$xlevels$`Appt Type` <- union(LOS_lm_2_1$xlevels$`Appt Type`, levels(dat_lr_2_test$`Appt Type`))
+LOS_pre <- predict(LOS_lm_2_1, dat_lr_2_test)
+dat_lr_2_test$LOS <- LOS_pre
+dat_lr_2_test$`Depart Summary` <- dat_lr_2_test$`Rooming Form` + dat_lr_2_test$LOS*60
+dat_lr_2_test$endOfAppt <- dat_lr_2_test$`Depart Summary` + 10*60
+dat_lr_2 <- rbind(dat_lr_2_train, dat_lr_2_test)
+sum(is.na(dat_lr_2$`Depart Summary`))
+```
+
+#### 5.3.3.2 Since we have already imputed all the missing values, let us use it to calculate staffed rooms
+```{r, echo=FALSE, warning=FALSE}
+# order data chronologically
+dat_lr_2 <- dat_lr_2[order(dat_lr_2$`Appt Date`, dat_lr_2$`Morning/Afternoon`, dat_lr_2$startOfAppt),]
+library(plyr)
+library(knitr)
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(count(dat_lr_2$`Appt Date`)$freq), sum(count(unique(dat_lr_2$Session))$freq))
+colnames(rooms) <- unique(dat_lr_2$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(dat_lr_2)){
+  if ((dat_lr_2$`Appt Date`[z] == dat_lr_2$`Appt Date`[z-1]) & 
+      (dat_lr_2$`Morning/Afternoon`[z] == dat_lr_2$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (dat_lr_2$endOfAppt[k] > dat_lr_2$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(dat_lr_2)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (dat_lr_2$`Appt Date`[z] != dat_lr_2$`Appt Date`[z-1] |
+           dat_lr_2$`Morning/Afternoon`[z] != dat_lr_2$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+maxrooms.df$Number.Patients <- count(dat_lr_2$Session)$freq
+##kable(maxrooms.df[,c(1:2)], format = "markdown")
+# prep data to be joined with rent grid
+maxrooms.df$Date <- gsub("\\ .*","",maxrooms.df$Session)
+maxrooms.df$Date <- as.POSIXct(maxrooms.df$Date, format = "%Y-%m-%d")
+
+maxrooms.df$`Morning/Afternoon` <- gsub(".* ", "", maxrooms.df$Session)
+maxrooms.df$`Day of Week` <- weekdays(maxrooms.df$Date, abbreviate = TRUE)
+maxrooms.df$Day.of.Month <- as.numeric(format(maxrooms.df$Date, "%d"))
+
+# add week number to staffed room data
+for (j in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$Day.of.Month[j]<=7) {
+    maxrooms.df$`Week Number`[j] <- 1
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=14) {
+    maxrooms.df$`Week Number`[j] <- 2
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=21) {
+    maxrooms.df$`Week Number`[j] <- 3
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=28) {
+    maxrooms.df$`Week Number`[j] <- 4
+  }
+  else {
+    maxrooms.df$`Week Number`[j] <- 5
+  }
+}
+
+# Time of day
+for (i in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$`Morning/Afternoon`[i] == "MORNING") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "AM"
+  }
+  else if (maxrooms.df$`Morning/Afternoon` [i] == "AFTERNOON") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "PM"
+  }
+}
+maxrooms.df$Staffed.Rooms <- maxrooms.df$maxrooms
+maxrooms.df$maxrooms <- NULL
+colnames(maxrooms.df)[colnames(maxrooms.df)=="Date"] <- "Appt Date"
+maxrooms.df$`Morning/Afternoon` <- ifelse(maxrooms.df$`Morning/Afternoon`=="AM", "AM - MORNING", "PM - AFTERNOON")
+
+write.csv(maxrooms.df, file = "staffedrooms(lr_35).csv", row.names = FALSE)
+detach(package:plyr)
+room_lr_35 <- read.csv("staffedrooms(lr_35).csv")
+diff_lr_35 <- abs(room_lr$Staffed.Rooms - room_ori$Staffed.Rooms)
+lr_rmse_35 <- sqrt(mean((room_lr_35$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+lr_rmse_35
+```
+
+### 5.3.4 Since there are many categorical predictors in the data set. linear regression seems to be bad in this situation. I decide to use regression tree to estimate LOS and LOW. Then use it to calculate staffed rooms.
+
+```{r}
+dat_rt <- mis_data
+dat_rt <- dat_rt[, !names(dat_rt) %in% c("City","State" ,"Zip Code")]
+## When Check In Time is NA, delete it(in order to be accord with previous work: line 145)
+dat_rt <- dat_rt[!is.na(dat_rt$`Check In Time`),]
+dat_rt_test <- dat_rt[is.na(dat_rt$`Rooming Form`),]
+dat_rt$LOW <- as.numeric(difftime(dat_rt$startOfAppt, dat_rt$`Check In Time`, units = "mins"))
+dat_rt <- dat_rt[, names(dat_rt) %in% c("Appt Date", "Appt Length", "Day of Week", "Provider", "Appt Time", "Morning/Afternoon", "Pat Sex","Age", "Appt Type", "chp_distance", "Check In Time", "Rooming Form", "Depart Summary","LOW", "startOfAppt", "endOfAppt", "LOS", "Session")]
+dat_rt$`Day of Week` <- as.factor(dat_rt$`Day of Week`)
+dat_rt$Provider <- as.factor(dat_rt$Provider)
+dat_rt$hour <- hour(hm(dat_rt$`Appt Time`))
+dat_rt$minut <- minute(hm(dat_rt$`Appt Time`))
+dat_rt$appt_time <- 60*dat_rt$hour+dat_rt$minut
+dat_rt$`Morning/Afternoon` <- as.factor(dat_rt$`Morning/Afternoon`)
+dat_rt$`Pat Sex` <- as.factor(dat_rt$`Pat Sex`)
+dat_rt$`Appt Type` <- as.factor(dat_rt$`Appt Type`)
+## Use random forest to estimate LOW
+dat_rt_train <-as.data.frame(dat_rt[!is.na(dat_rt$`Rooming Form`),])
+dat_rt_test <- as.data.frame(dat_rt[is.na(dat_rt$`Rooming Form`),])
+#names(dat_rt_train) <- make.names(names(dat_rt_train))
+#names(dat_rt_test) <- make.names(names(dat_rt_test))
+library(rpart)
+rt_1 <- rpart(LOW ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt_train)
+#library(caret)
+#rt_1 <- train(x = dat_rt_train[, which(names(dat_rt_train) %in% c("Appt Date" ,"Day of Week","Appt Length", "appt_time", "Morning/Afternoon", "Pat Sex", "Age" ,"Appt Type"))], y = dat_rt_train$LOW, method = "rpart2", tuneLength = 5, trControl = trainControl(method = "cv"))
+##rt_1 <- randomForest(LOW ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt_train, ntree = 1000)
+## impute missing values in Rooming Form
+LOW_pre_rt <- predict(rt_1, dat_rt_test)
+dat_rt_test$LOW <- LOW_pre_rt
+dat_rt_test$`Rooming Form` <- dat_rt_test$`Check In Time` + dat_rt_test$LOW * 60
+dat_rt_test$startOfAppt <- dat_rt_test$`Rooming Form`
+dat_rt_2 <- rbind(dat_rt_test, dat_rt_train)
+sum(is.na(dat_rt_2$`Rooming Form`))
+## Use random forest to estimate LOS
+dat_rt2_train <-dat_rt_2[!is.na(dat_rt_2$`Depart Summary`),]
+dat_rt2_test <- dat_rt_2[is.na(dat_rt_2$`Depart Summary`),]
+rt_2 <- rpart(LOS ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt2_train)
+## impute missing values in Depart Summary
+LOS_pre_rt <- predict(rt_2, dat_rt2_test)
+dat_rt2_test$LOS <- LOS_pre_rt
+dat_rt2_test$`Depart Summary` <- dat_rt2_test$startOfAppt + dat_rt2_test$LOS*60
+dat_rt2_test$endOfAppt <- dat_rt2_test$`Depart Summary` + 10*60
+dat_rt_3 <- rbind(dat_rt2_test, dat_rt2_train)
+sum(is.na(dat_rt_3$`Depart Summary`))
+```
+
+#### 5.3.4.2 Now we can use the imputed dataset to calculate staffed rooms
+```{r, echo=FALSE, warning=FALSE}
+# order data chronologically
+dat_rt_3 <- dat_rt_3[order(dat_rt_3$`Appt Date`, dat_rt_3$`Morning/Afternoon`, dat_rt_3$startOfAppt),]
+library(plyr)
+library(knitr)
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(count(dat_rt_3$`Appt Date`)$freq), sum(count(unique(dat_rt_3$Session))$freq))
+colnames(rooms) <- unique(dat_rt_3$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(dat_rt_3)){
+  if ((dat_rt_3$`Appt Date`[z] == dat_rt_3$`Appt Date`[z-1]) & 
+      (dat_rt_3$`Morning/Afternoon`[z] == dat_rt_3$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (dat_rt_3$endOfAppt[k] > dat_rt_3$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(dat_rt_3)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (dat_rt_3$`Appt Date`[z] != dat_rt_3$`Appt Date`[z-1] |
+           dat_rt_3$`Morning/Afternoon`[z] != dat_rt_3$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+maxrooms.df$Number.Patients <- count(dat_rt_3$Session)$freq
+##kable(maxrooms.df[,c(1:2)], format = "markdown")
+# prep data to be joined with rent grid
+maxrooms.df$Date <- gsub("\\ .*","",maxrooms.df$Session)
+maxrooms.df$Date <- as.POSIXct(maxrooms.df$Date, format = "%Y-%m-%d")
+
+maxrooms.df$`Morning/Afternoon` <- gsub(".* ", "", maxrooms.df$Session)
+maxrooms.df$`Day of Week` <- weekdays(maxrooms.df$Date, abbreviate = TRUE)
+maxrooms.df$Day.of.Month <- as.numeric(format(maxrooms.df$Date, "%d"))
+
+# add week number to staffed room data
+for (j in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$Day.of.Month[j]<=7) {
+    maxrooms.df$`Week Number`[j] <- 1
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=14) {
+    maxrooms.df$`Week Number`[j] <- 2
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=21) {
+    maxrooms.df$`Week Number`[j] <- 3
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=28) {
+    maxrooms.df$`Week Number`[j] <- 4
+  }
+  else {
+    maxrooms.df$`Week Number`[j] <- 5
+  }
+}
+
+# Time of day
+for (i in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$`Morning/Afternoon`[i] == "MORNING") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "AM"
+  }
+  else if (maxrooms.df$`Morning/Afternoon` [i] == "AFTERNOON") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "PM"
+  }
+}
+maxrooms.df$Staffed.Rooms <- maxrooms.df$maxrooms
+maxrooms.df$maxrooms <- NULL
+colnames(maxrooms.df)[colnames(maxrooms.df)=="Date"] <- "Appt Date"
+maxrooms.df$`Morning/Afternoon` <- ifelse(maxrooms.df$`Morning/Afternoon`=="AM", "AM - MORNING", "PM - AFTERNOON")
+
+write.csv(maxrooms.df, file = "staffedrooms(rt_35).csv", row.names = FALSE)
+detach(package:plyr)
+room_rt_35 <- read.csv("staffedrooms(rt_35).csv")
+diff_rt_35 <- abs(room_lr$Staffed.Rooms - room_ori$Staffed.Rooms)
+rt_rmse_35 <- sqrt(mean((room_rt_35$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+rt_rmse
+```
+
+### 5.3.5 use the function to caculat RMSE use the dataset imputed by CI, LR, RT
+```{r, echo=FALSE, warning=FALSE}
+error_ci_35 <- Caculate_Maxroom(real = "staffedrooms(ci_35).csv")
+error_lr_35 <- Caculate_Maxroom(real = "staffedrooms(lr_35).csv")
+error_rt_35 <- Caculate_Maxroom(real = "staffedrooms(rt_35).csv")
+error_del_35 <- Caculate_Maxroom(real = "staffedrooms(del_35).csv")
+rmse_35 <- data.frame(model_error_ci.lower, model_error_ci.upper, error_ci_35, error_lr_35, error_rt_35, error_del_35)
+```
+
+## 5.4 Now, we contruct dataset with 45% missing values
+
+- Create dataset with 45 percent of missing value
+```{r}
+dat_1 <- dat
+pointer_or <- which((is.na(dat_1$`Depart Summary`) & !is.na(dat_1$`Rooming Form`)) | ((is.na(dat_1$`Depart Summary`) & is.na(dat_1$`Rooming Form`) & !is.na(dat_1$`Check In Time`))))
+length(pointer_or)/nrow(dat_1)
+pointer <- as.integer(1 : nrow(dat_1))
+# case3 percentage
+case3_per <- nrow(dat[!is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+pointer_mis_case3 <- sample(pointer[-pointer_or], size = (mp$`45 percent`[1]/100 - case3_per) * nrow(dat))
+mis_data <- dat
+mis_data$`Depart Summary`[pointer_mis_case3] <- NA
+# case4.1 percentage
+case4.1_per <- nrow(dat[is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+pointer_mis_case4.1 <- sample(pointer[-pointer_mis_case3][-pointer_or], size = (mp$`45 percent`[2]/100 - case4.1_per)* nrow(dat))
+##why length(pointer[-pointer_mis_case3][-pointer_or]) !=
+## length(pointer) - length(pointer_mis_case3) - ##length(pointer_or) and intersect(pointer_or, pointer_mis_case3) = 0, intersect(pointer_mis_case4.1, pointer_mis_case3) = 0,
+##length(pointer_or)+length(pointer_mis_case3) + length(pointer_mis_case4.1) = nrow(dat)*0.35
+mis_data$`Rooming Form`[pointer_mis_case4.1] <- NA
+mis_data$`Depart Summary`[pointer_mis_case4.1] <- NA
+##validate the percentage of missing value
+nrow(mis_data[!is.na(mis_data$`Rooming Form`) & is.na(mis_data$`Depart Summary`),])/nrow(mis_data) + nrow(mis_data[is.na(mis_data$`Rooming Form`) & is.na(mis_data$`Depart Summary`) & !is.na(mis_data$`Check In Time`),])/nrow(mis_data)
+## Why there is only 42.4% missing data?
+```
+
+
+### 5.4.1 caculate the staffed room using data set which deletes all the missing value
+```{r}
+mis_data_del <- mis_data
+del_45 <- mis_data_del[!is.na(mis_data$`Rooming Form`) & !is.na(mis_data$`Depart Summary`),]
+staffed_del_45 <- Caculate_staff(del_45)
+write.csv(staffed_del_45, file = "staffedrooms(del_45).csv", row.names = FALSE)
+room_del_45 <- read.csv("staffedrooms(del_45).csv")
+room_ori <- read.csv("staffedrooms(ori).csv")
+## Find out sessions don't contained in del data set, set staffed room to 0
+diff_session <- room_ori[!(room_ori$Session %in% room_del_45$Session),]
+room_del_45 <- rbind(room_del_45, setNames(room_ori[!(room_ori$Session %in% room_del_45$Session),], names(room_del_45)))
+#set staffed room to 0
+room_del_45[room_del_45$Session %in% diff_session$Session,]$Staffed.Rooms <- 0
+# Order data by Session
+room_del_45$Session <- as.POSIXct(room_del_45$Session)
+room_del_45 <- room_del_45[order(room_del_45$Session, room_del_45$Morning.Afternoon),]
+diff_del_45 <- abs(room_del_45$Staffed.Rooms - room_ori$Staffed.Rooms)
+del_45_rmse <- sqrt(mean((room_del_45$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+```
+
+
+### 5.4.2 Impute the dataset using conditional imputation
+
+```{r}
+mis_data_ci <- mis_data
+# declare start of appointment
+mis_data_ci$startOfAppt <- mis_data_ci$`Rooming Form`
+
+# format check in time to match rooming form
+##mis_data_ci$`Check In Time` <- sub("([0-9])([A-Z])", "\\1 \\2", mis_data_ci$`Check In Time`)
+mis_data_ci$`Check In Time` <- as.POSIXct(mis_data_ci$`Check In Time`, format = "%m/%d/%Y %I:%M %p")
+# format check out time to match rooming form
+##mis_data_ci$`Check Out Time` <- sub("([0-9])([A-Z])", "\\1 \\2", mis_data_ci$`Check Out Time`)
+mis_data_ci$`Check Out Time` <- as.POSIXct(mis_data_ci$`Check Out Time`, format = "%m/%d/%Y %I:%M %p")
+
+# (case 4.1) use check in time + delay when rooming form not available
+for (i in 1:nrow(mis_data_ci)) {
+  if(is.na(mis_data_ci$startOfAppt[i])) {
+    mis_data_ci$startOfAppt[i] <- mis_data_ci$`Check In Time`[i] + checkInDelay*secInMin
+  }
+}
+
+# declare end of appointment
+mis_data_ci$endOfAppt <- mis_data_ci$`Depart Summary`
+
+# find average time in room for different appointment lengths
+# calculate length of stay and only use valid lengths
+mis_data_ci$LOS <- as.numeric(difftime(mis_data_ci$endOfAppt, mis_data_ci$startOfAppt, units = "mins"))
+mis_data_ci <- mis_data_ci[(mis_data_ci$LOS>minApptLength &
+             mis_data_ci$LOS<maxApptLength)|
+             is.na(mis_data_ci$LOS),]
+nrow(mis_data_ci[mis_data_ci$LOS<minApptLength | mis_data_ci$LOS > maxApptLength,])
+### should we use the average length to replace the invalid lengths not just delete them?
+
+# find averages for each appointment length
+# find averages for each appointment length
+losAvg1 <- mis_data_ci %>% dplyr::group_by(`Appt Length`) %>%
+            dplyr::summarise(Mean=round(mean(LOS, na.rm = TRUE)),
+                      Stdev=round(sd(LOS, na.rm = TRUE)),
+                      N = n_distinct(`Check In Time`) )
+#losAvg1 <- losAvg1[losAvg1$N >= minN & !is.na(losAvg1$`Appt Length`),]
+
+# (case 3): use start of appointment + estimated time in room when depart summary not available
+for (i in 1:nrow(mis_data_ci)) {
+  if (is.na(mis_data_ci$endOfAppt[i])&
+      !is.na(mis_data_ci$startOfAppt[i])) {
+    for (j in 1:nrow(losAvg1)) {
+      if (mis_data_ci$`Appt Length`[i] == losAvg1$`Appt Length`[j]) {
+        mis_data_ci$LOS[i] <- losAvg1$Mean[j]
+      }
+    }
+    mis_data_ci$endOfAppt[i] <- mis_data_ci$startOfAppt[i] + mis_data_ci$LOS[i]*secInMin
+  }
+}
+sum(is.na(mis_data_ci$endOfAppt))
+# add allowance for end of appointment
+mis_data_ci$endOfAppt<- mis_data_ci$endOfAppt + 10*60
+
+#Reclassify morning patients as afternoon if entered room after 12:00PM, reclassify afternoon patients as morning if entered exam room before 12:00 PM
+for (i in 1:nrow(mis_data_ci))
+{
+  if(hour(mis_data_ci$startOfAppt[i])>=12)
+  {mis_data_ci$`Morning/Afternoon`[i] <- "PM - AFTERNOON"}
+  else if (hour(mis_data_ci$startOfAppt[i])<12)
+  {mis_data_ci$`Morning/Afternoon`[i] <- "AM - MORNING"}
+}
+mis_data_ci <- mis_data_ci[order(mis_data_ci$`Appt Date`, mis_data_ci$`Morning/Afternoon`, mis_data_ci$startOfAppt),]
+mis_data_ci <- mis_data_ci[!is.na(mis_data_ci$endOfAppt),]## why there are missing values here
+sum(is.na(mis_data_ci$startOfAppt))
+sum(is.na(mis_data_ci$endOfAppt))
+```
+
+#### 5.4.2.2 Use new imputated dataset to caculate Maxroom
+
+```{r}
+library(plyr)
+library(knitr)
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(count(mis_data_ci$`Appt Date`)$freq), sum(count(unique(mis_data_ci$Session))$freq))
+colnames(rooms) <- unique(mis_data_ci$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(mis_data_ci)){
+  if ((mis_data_ci$`Appt Date`[z] == mis_data_ci$`Appt Date`[z-1]) & 
+      (mis_data_ci$`Morning/Afternoon`[z] == mis_data_ci$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (mis_data_ci$endOfAppt[k] > mis_data_ci$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(mis_data_ci)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (mis_data_ci$`Appt Date`[z] != mis_data_ci$`Appt Date`[z-1] |
+           mis_data_ci$`Morning/Afternoon`[z] != mis_data_ci$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+maxrooms.df$Number.Patients <- count(mis_data_ci$Session)$freq
+##kable(maxrooms.df[,c(1:2)], format = "markdown")
+# prep data to be joined with rent grid
+maxrooms.df$Date <- gsub("\\ .*","",maxrooms.df$Session)
+maxrooms.df$Date <- as.POSIXct(maxrooms.df$Date, format = "%Y-%m-%d")
+
+maxrooms.df$`Morning/Afternoon` <- gsub(".* ", "", maxrooms.df$Session)
+maxrooms.df$`Day of Week` <- weekdays(maxrooms.df$Date, abbreviate = TRUE)
+maxrooms.df$Day.of.Month <- as.numeric(format(maxrooms.df$Date, "%d"))
+
+# add week number to staffed room data
+for (j in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$Day.of.Month[j]<=7) {
+    maxrooms.df$`Week Number`[j] <- 1
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=14) {
+    maxrooms.df$`Week Number`[j] <- 2
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=21) {
+    maxrooms.df$`Week Number`[j] <- 3
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=28) {
+    maxrooms.df$`Week Number`[j] <- 4
+  }
+  else {
+    maxrooms.df$`Week Number`[j] <- 5
+  }
+}
+
+# Time of day
+for (i in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$`Morning/Afternoon`[i] == "MORNING") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "AM"
+  }
+  else if (maxrooms.df$`Morning/Afternoon` [i] == "AFTERNOON") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "PM"
+  }
+}
+maxrooms.df$Staffed.Rooms <- maxrooms.df$maxrooms
+maxrooms.df$maxrooms <- NULL
+colnames(maxrooms.df)[colnames(maxrooms.df)=="Date"] <- "Appt Date"
+maxrooms.df$`Morning/Afternoon` <- ifelse(maxrooms.df$`Morning/Afternoon`=="AM", "AM - MORNING", "PM - AFTERNOON")
+
+write.csv(maxrooms.df, file = "staffedrooms(ci_45).csv", row.names = FALSE)
+detach(package:plyr)
+
+##ci <- Caculate_Maxroom(mis_data_ci)
+```
+
+#### 5.4.2.3 Compare the staffedrooms(ci_35) with staffedrooms(ori)
+
+```{r}
+room_ci_45 <- read.csv("staffedrooms(ci_45).csv")
+room_ori <- read.csv("staffedrooms(ori).csv")
+#diff_ci_25 <- abs(room_ci_25$Staffed.Rooms - room_ori$Staffed.Rooms)
+ci_rmse_45 <- sqrt(mean((room_ci_45$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+ci_rmse_45
+```
+
+### 5.4.3 Impute the dataset using linear regression
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+#Build linear regression model for LOW  to deal with missing values in Rooming Form
+dat_lr <- mis_data
+# Since many of the columns are related to geographic positions of the patients, I'd like to change all these independent variables into Distance between patients and clinic.
+#my_distance <- read.csv(file.path(datadirectory,"swpazctadistance.csv"))
+#colnames(my_distance) = my_distance[1,]
+#rownames(my_distance) = my_distance[,2]
+#my_distance <- my_distance[-1,-1]
+#chp_distance <- data.frame(my_distance[,c(1,83)])
+#colnames(chp_distance) <- c("Zip Code","chp_distance")
+#dat_lr <- merge(dat_lr,chp_distance,by=c("Zip Code"="Zip Code"))
+## There're strange distance value in the previous step which are caused by origianal distance dataset. I'm afraid this will cause error in linear regression model and the merge will reduce the rows of the data set
+dat_lr <- dat_lr[, !names(dat_lr) %in% c("City","State" ,"Zip Code")]
+dat_lr$LOW <- as.numeric(difftime(dat_lr$startOfAppt, dat_lr$`Check In Time`, units = "mins"))
+#Choose useful predictors and change the attributes of different independent variables for the sake of linear regression
+dat_lr <- dat_lr[, names(dat_lr) %in% c("Appt Date", "Appt Length", "Day of Week", "Provider", "Appt Time", "Morning/Afternoon", "Pat Sex","Age", "Appt Type", "chp_distance", "Check In Time", "Rooming Form", "Depart Summary","LOW", "startOfAppt", "endOfAppt", "LOS", "Session")]
+dat_lr$`Day of Week` <- as.factor(dat_lr$`Day of Week`)
+dat_lr$Provider <- as.factor(dat_lr$Provider)
+##dat_lr$`Appt Time` <- as.POSIXct(dat_lr$`Appt Time`, format = "%H:%M")
+##dat_lr$`Appt Time` <- format(dat_lr$`Appt Time`, format="%H:%M")
+## the code above automatically using today's date. It's too hard to convert colname Appt Time into POSIXct format without date. I suspect this will influence the result. I decide to change it to number
+dat_lr$`Appt Length` <- scale(dat_lr$`Appt Length`)
+dat_lr$hour <- hour(hm(dat_lr$`Appt Time`))
+dat_lr$minut <- minute(hm(dat_lr$`Appt Time`))
+dat_lr$appt_time <- 60*dat_lr$hour+dat_lr$minut
+dat_lr$appt_time <- scale(dat_lr$appt_time)
+dat_lr$`Morning/Afternoon` <- as.factor(dat_lr$`Morning/Afternoon`)
+dat_lr$`Pat Sex` <- as.factor(dat_lr$`Pat Sex`)
+dat_lr$`Appt Type` <- as.factor(dat_lr$`Appt Type`)
+dat_lr$Age <- scale(dat_lr$Age)
+#dat_lr$chp_distance <- scale(dat_lr$chp_distance)
+#Create training data and test data
+dat_lr_train <- dat_lr[!is.na(dat_lr$`Rooming Form`),]
+dat_lr_test <- dat_lr[is.na(dat_lr$`Rooming Form`),]
+LOW_lm <- lm(LOW ~ `Appt Date` + `Day of Week` + `Appt Length` + Provider + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_lr_train)
+summary(LOW_lm)
+## Since there are too many factors in the data set the result is very bad, I need to reduce predictors. I decide to eliminate columns which mostly have p-value bigger than 0.05
+LOW_lm_1 <- lm(LOW ~ appt_time + `Morning/Afternoon`, data = dat_lr_train)
+summary(LOW_lm_1)
+## The R-squared is very low. While P-values suggest that there are relation ships between LOW and appt_time + `Morning/Afternoon`, maybe I can try other nonlinear regression later.
+## Now use the model to predict missing values in Rooming Form
+LOW_pre <- predict(LOW_lm_1, dat_lr_test)
+## impute missing values in Rooming Form
+dat_lr_test$LOW <- LOW_pre
+dat_lr_test$`Rooming Form` <- dat_lr_test$`Check In Time` + dat_lr_test$LOW * 60
+dat_lr_test$startOfAppt <- dat_lr_test$`Rooming Form`
+dat_lr_2 <- rbind(dat_lr_test, dat_lr_train)
+sum(is.na(dat_lr_2$`Rooming Form`))
+## Now we use linear regression to predict LOS, then use Depart Summary = Rooming Form + LOS, endOfAppt = Depart Summary + 10*60 to calculate the time when patients live the room
+dat_lr_2_train <- dat_lr_2[!is.na(dat_lr_2$`Depart Summary`),]
+dat_lr_2_test <- dat_lr_2[is.na(dat_lr_2$`Depart Summary`),]
+LOS_lm_2_1 <- lm(LOS ~ `Appt Date` + `Day of Week` + `Appt Length` + Provider + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_lr_2_train)
+summary(LOS_lm_2_1)
+## R square is very low. I decide to get rid of all the factors which have high p-value
+LOS_lm_2_2 <- lm(LOS ~`Appt Length` + `Appt Type`, data = dat_lr_2_train)
+summary(LOS_lm_2_2)
+##impute missing values in Depart Summary
+LOS_pre <- predict(LOS_lm_2_2, dat_lr_2_test)
+dat_lr_2_test$LOS <- LOS_pre
+dat_lr_2_test$`Depart Summary` <- dat_lr_2_test$`Rooming Form` + dat_lr_2_test$LOS*60
+dat_lr_2_test$endOfAppt <- dat_lr_2_test$`Depart Summary` + 10*60
+dat_lr_2 <- rbind(dat_lr_2_train, dat_lr_2_test)
+sum(is.na(dat_lr_2$`Depart Summary`))
+```
+
+#### 5.4.3.2 Since we have already imputed all the missing values, let us use it to calculate staffed rooms
+```{r}
+# order data chronologically
+dat_lr_2 <- dat_lr_2[order(dat_lr_2$`Appt Date`, dat_lr_2$`Morning/Afternoon`, dat_lr_2$startOfAppt),]
+library(plyr)
+library(knitr)
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(count(dat_lr_2$`Appt Date`)$freq), sum(count(unique(dat_lr_2$Session))$freq))
+colnames(rooms) <- unique(dat_lr_2$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(dat_lr_2)){
+  if ((dat_lr_2$`Appt Date`[z] == dat_lr_2$`Appt Date`[z-1]) & 
+      (dat_lr_2$`Morning/Afternoon`[z] == dat_lr_2$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (dat_lr_2$endOfAppt[k] > dat_lr_2$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(dat_lr_2)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (dat_lr_2$`Appt Date`[z] != dat_lr_2$`Appt Date`[z-1] |
+           dat_lr_2$`Morning/Afternoon`[z] != dat_lr_2$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+maxrooms.df$Number.Patients <- count(dat_lr_2$Session)$freq
+##kable(maxrooms.df[,c(1:2)], format = "markdown")
+# prep data to be joined with rent grid
+maxrooms.df$Date <- gsub("\\ .*","",maxrooms.df$Session)
+maxrooms.df$Date <- as.POSIXct(maxrooms.df$Date, format = "%Y-%m-%d")
+
+maxrooms.df$`Morning/Afternoon` <- gsub(".* ", "", maxrooms.df$Session)
+maxrooms.df$`Day of Week` <- weekdays(maxrooms.df$Date, abbreviate = TRUE)
+maxrooms.df$Day.of.Month <- as.numeric(format(maxrooms.df$Date, "%d"))
+
+# add week number to staffed room data
+for (j in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$Day.of.Month[j]<=7) {
+    maxrooms.df$`Week Number`[j] <- 1
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=14) {
+    maxrooms.df$`Week Number`[j] <- 2
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=21) {
+    maxrooms.df$`Week Number`[j] <- 3
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=28) {
+    maxrooms.df$`Week Number`[j] <- 4
+  }
+  else {
+    maxrooms.df$`Week Number`[j] <- 5
+  }
+}
+
+# Time of day
+for (i in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$`Morning/Afternoon`[i] == "MORNING") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "AM"
+  }
+  else if (maxrooms.df$`Morning/Afternoon` [i] == "AFTERNOON") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "PM"
+  }
+}
+maxrooms.df$Staffed.Rooms <- maxrooms.df$maxrooms
+maxrooms.df$maxrooms <- NULL
+colnames(maxrooms.df)[colnames(maxrooms.df)=="Date"] <- "Appt Date"
+maxrooms.df$`Morning/Afternoon` <- ifelse(maxrooms.df$`Morning/Afternoon`=="AM", "AM - MORNING", "PM - AFTERNOON")
+
+write.csv(maxrooms.df, file = "staffedrooms(lr_45).csv", row.names = FALSE)
+detach(package:plyr)
+room_lr_45 <- read.csv("staffedrooms(lr_45).csv")
+diff_lr_45 <- abs(room_lr_45$Staffed.Rooms - room_ori$Staffed.Rooms)
+lr_rmse_45 <- sqrt(mean((room_lr_45$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+lr_rmse_45
+```
+
+### 5.4.4 Since there are many categorical predictors in the data set. linear regression seems to be bad in this situation. I decide to use regression tree to estimate LOS and LOW. Then use it to calculate staffed rooms.
+
+```{r}
+dat_rt <- mis_data
+dat_rt <- dat_rt[, !names(dat_rt) %in% c("City","State" ,"Zip Code")]
+## When Check In Time is NA, delete it(in order to be accord with previous work: line 145)
+dat_rt <- dat_rt[!is.na(dat_rt$`Check In Time`),]
+dat_rt_test <- dat_rt[is.na(dat_rt$`Rooming Form`),]
+dat_rt$LOW <- as.numeric(difftime(dat_rt$startOfAppt, dat_rt$`Check In Time`, units = "mins"))
+dat_rt <- dat_rt[, names(dat_rt) %in% c("Appt Date", "Appt Length", "Day of Week", "Provider", "Appt Time", "Morning/Afternoon", "Pat Sex","Age", "Appt Type", "chp_distance", "Check In Time", "Rooming Form", "Depart Summary","LOW", "startOfAppt", "endOfAppt", "LOS", "Session")]
+dat_rt$`Day of Week` <- as.factor(dat_rt$`Day of Week`)
+dat_rt$Provider <- as.factor(dat_rt$Provider)
+dat_rt$hour <- hour(hm(dat_rt$`Appt Time`))
+dat_rt$minut <- minute(hm(dat_rt$`Appt Time`))
+dat_rt$appt_time <- 60*dat_rt$hour+dat_rt$minut
+dat_rt$`Morning/Afternoon` <- as.factor(dat_rt$`Morning/Afternoon`)
+dat_rt$`Pat Sex` <- as.factor(dat_rt$`Pat Sex`)
+dat_rt$`Appt Type` <- as.factor(dat_rt$`Appt Type`)
+## Use random forest to estimate LOW
+dat_rt_train <-as.data.frame(dat_rt[!is.na(dat_rt$`Rooming Form`),])
+dat_rt_test <- as.data.frame(dat_rt[is.na(dat_rt$`Rooming Form`),])
+#names(dat_rt_train) <- make.names(names(dat_rt_train))
+#names(dat_rt_test) <- make.names(names(dat_rt_test))
+library(rpart)
+rt_1 <- rpart(LOW ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt_train)
+#library(caret)
+#rt_1 <- train(x = dat_rt_train[, which(names(dat_rt_train) %in% c("Appt Date" ,"Day of Week","Appt Length", "appt_time", "Morning/Afternoon", "Pat Sex", "Age" ,"Appt Type"))], y = dat_rt_train$LOW, method = "rpart2", tuneLength = 5, trControl = trainControl(method = "cv"))
+##rt_1 <- randomForest(LOW ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt_train, ntree = 1000)
+## impute missing values in Rooming Form
+LOW_pre_rt <- predict(rt_1, dat_rt_test)
+dat_rt_test$LOW <- LOW_pre_rt
+dat_rt_test$`Rooming Form` <- dat_rt_test$`Check In Time` + dat_rt_test$LOW * 60
+dat_rt_test$startOfAppt <- dat_rt_test$`Rooming Form`
+dat_rt_2 <- rbind(dat_rt_test, dat_rt_train)
+sum(is.na(dat_rt_2$`Rooming Form`))
+## Use random forest to estimate LOS
+dat_rt2_train <-dat_rt_2[!is.na(dat_rt_2$`Depart Summary`),]
+dat_rt2_test <- dat_rt_2[is.na(dat_rt_2$`Depart Summary`),]
+rt_2 <- rpart(LOS ~`Appt Date` + `Day of Week` + `Appt Length` + appt_time + `Morning/Afternoon` + `Pat Sex` + Age + `Appt Type`, data = dat_rt2_train)
+## impute missing values in Depart Summary
+LOS_pre_rt <- predict(rt_2, dat_rt2_test)
+dat_rt2_test$LOS <- LOS_pre_rt
+dat_rt2_test$`Depart Summary` <- dat_rt2_test$startOfAppt + dat_rt2_test$LOS*60
+dat_rt2_test$endOfAppt <- dat_rt2_test$`Depart Summary` + 10*60
+dat_rt_3 <- rbind(dat_rt2_test, dat_rt2_train)
+sum(is.na(dat_rt_3$`Depart Summary`))
+```
+
+#### 5.4.4.2 Now we can use the imputed dataset to calculate staffed rooms
+```{r}
+# order data chronologically
+dat_rt_3 <- dat_rt_3[order(dat_rt_3$`Appt Date`, dat_rt_3$`Morning/Afternoon`, dat_rt_3$startOfAppt),]
+library(plyr)
+library(knitr)
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(count(dat_rt_3$`Appt Date`)$freq), sum(count(unique(dat_rt_3$Session))$freq))
+colnames(rooms) <- unique(dat_rt_3$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(dat_rt_3)){
+  if ((dat_rt_3$`Appt Date`[z] == dat_rt_3$`Appt Date`[z-1]) & 
+      (dat_rt_3$`Morning/Afternoon`[z] == dat_rt_3$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (dat_rt_3$endOfAppt[k] > dat_rt_3$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(dat_rt_3)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (dat_rt_3$`Appt Date`[z] != dat_rt_3$`Appt Date`[z-1] |
+           dat_rt_3$`Morning/Afternoon`[z] != dat_rt_3$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+maxrooms.df$Number.Patients <- count(dat_rt_3$Session)$freq
+##kable(maxrooms.df[,c(1:2)], format = "markdown")
+# prep data to be joined with rent grid
+maxrooms.df$Date <- gsub("\\ .*","",maxrooms.df$Session)
+maxrooms.df$Date <- as.POSIXct(maxrooms.df$Date, format = "%Y-%m-%d")
+
+maxrooms.df$`Morning/Afternoon` <- gsub(".* ", "", maxrooms.df$Session)
+maxrooms.df$`Day of Week` <- weekdays(maxrooms.df$Date, abbreviate = TRUE)
+maxrooms.df$Day.of.Month <- as.numeric(format(maxrooms.df$Date, "%d"))
+
+# add week number to staffed room data
+for (j in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$Day.of.Month[j]<=7) {
+    maxrooms.df$`Week Number`[j] <- 1
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=14) {
+    maxrooms.df$`Week Number`[j] <- 2
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=21) {
+    maxrooms.df$`Week Number`[j] <- 3
+  }
+  else if (maxrooms.df$Day.of.Month[j]<=28) {
+    maxrooms.df$`Week Number`[j] <- 4
+  }
+  else {
+    maxrooms.df$`Week Number`[j] <- 5
+  }
+}
+
+# Time of day
+for (i in 1:nrow(maxrooms.df)) {
+  if (maxrooms.df$`Morning/Afternoon`[i] == "MORNING") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "AM"
+  }
+  else if (maxrooms.df$`Morning/Afternoon` [i] == "AFTERNOON") {
+    maxrooms.df$`Morning/Afternoon`[i] <- "PM"
+  }
+}
+maxrooms.df$Staffed.Rooms <- maxrooms.df$maxrooms
+maxrooms.df$maxrooms <- NULL
+colnames(maxrooms.df)[colnames(maxrooms.df)=="Date"] <- "Appt Date"
+maxrooms.df$`Morning/Afternoon` <- ifelse(maxrooms.df$`Morning/Afternoon`=="AM", "AM - MORNING", "PM - AFTERNOON")
+
+write.csv(maxrooms.df, file = "staffedrooms(rt_45).csv", row.names = FALSE)
+detach(package:plyr)
+room_rt_45 <- read.csv("staffedrooms(rt_45).csv")
+#diff_rt_35 <- abs(room_lr$Staffed.Rooms - room_ori$Staffed.Rooms)
+rt_rmse_45 <- sqrt(mean((room_rt_45$Staffed.Rooms - room_ori$Staffed.Rooms)^2))
+rt_rmse_45
+```
+
+### 5.4.5 use the function to caculat RMSE use the dataset imputed by CI, LR, RT
+```{r, echo=FALSE, warning=FALSE}
+error_ci_45 <- Caculate_Maxroom(real = "staffedrooms(ci_45).csv")
+error_lr_45 <- Caculate_Maxroom(real = "staffedrooms(lr_45).csv")
+error_rt_45 <- Caculate_Maxroom(real = "staffedrooms(rt_45).csv")
+error_del_45 <- Caculate_Maxroom(real = "staffedrooms(del_45).csv")
+rmse_45 <- data.frame(model_error_ci.lower, model_error_ci.upper, error_ci_45, error_lr_45,error_rt_45, error_del_45)
+```
+
+# 6. get the result tables
+```{r}
+del_rmse <- c(del_15_rmse, del_25_rmse, del_35_rmse, del_45_rmse)
+ci_rmse_cal <- c(ci_rmse, ci_rmse_25, ci_rmse_35, ci_rmse_45)
+lr_rmse_cal <- c(lr_rmse, lr_rmse_25, lr_rmse_35, lr_rmse_45)
+rt_rmse_cal <- c(rt_rmse, rt_rmse_25, rt_rmse_35, rt_rmse_45)
+rmse_cal <- data.frame(ci_rmse_cal, lr_rmse_cal, rt_rmse_cal,del_rmse, row.names = c("15PercentMissingValue","25PercentMissingValue","35PercentMissingValue","45PercentMissingValue"))
+colnames(rmse_cal) <- c("ConditionalInputation", "LinearRegression", "RegressionTress","DeleteAllMissingValue")
+colnames(rmse_15) <- c("OriginalLowerBound", "OriginalUpperBound", "ConditionalImputation", "LinearRegression", "RegressionTree", "DeleteAllMissingValue")
+colnames(rmse_25) <- c("OriginalLowerBound", "OriginalUpperBound", "ConditionalImputation", "LinearRegression", "RegressionTree", "DeleteAllMissingValue")
+colnames(rmse_35) <- c("OriginalLowerBound", "OriginalUpperBound", "ConditionalImputation", "LinearRegression", "RegressionTree", "DeleteAllMissingValue")
+colnames(rmse_45) <- c("OriginalLowerBound", "OriginalUpperBound", "ConditionalImputation", "LinearRegression", "RegressionTree","DeleteAllMissingValue")
+rmse_model <- rbind(rmse_15[1,], rmse_25[1,], rmse_35[1,], rmse_45[1,])
+row.names(rmse_model) <- c("15PercentMissingValue", "25PercentMissingValue", "35PercentMissingValue", "45PercentMissingValue")
+rmse_real <- rbind(rmse_15[2,], rmse_25[2,], rmse_35[2,], rmse_45[2,])
+row.names(rmse_real) <- c("15PercentMissingValue", "25PercentMissingValue", "35PercentMissingValue", "45PercentMissingValue")
+```
+
+# 7. Show the rooms under 45percent missing value condition
+
+## 7.1 construct a function to caluate predicted room
+```{r}
+Caculate_Staffed_room <- function (real, datadirectory = "C:/TEXTBOOK/CHP/REPOSITORY_Ambulatory/pitt-chp-ambulatory/Missing Value(Neurology)", aggdata = "aggregatedate(ori).csv"){
+real_room <- read.csv(file.path(datadirectory, real))
+real_room$APT_DAY<-unlist(lapply(as.character(real_room$Session),
+                        function(x){ paste(strsplit(x," ")[[1]][[1]],
+                                           strsplit(x," ")[[1]][[2]])
+  
+}))
+
+aggregate_data <- read.csv(file.path(datadirectory, aggdata))
+for(i in 1 : nrow(aggregate_data)){
+  for(j in 1 : nrow(real_room)){
+    if(aggregate_data$APT_DAY[i] == real_room$APT_DAY[j]){
+      aggregate_data$Staffed.Rooms[i] <-    real_room$Staffed.Rooms[j]
+    }
+  }
+}
+
+library(caret)
+
+set.seed(1)
+control<-trainControl(method="cv",number=10)
+
+Metric <- "RMSE"
+set.seed(1)
+random_index<-sample(1:nrow(aggregate_data),(nrow(aggregate_data)*0.2))
+
+mytraining<-aggregate_data[-random_index,]
+mytesting<-aggregate_data[random_index,]
+mytesting$APT_DAY <- as.character(mytesting$APT_DAY)
+#agg = read.csv(file.path(datadirectory,aggdata))
+#oritesting <- agg[-random_index,]
+##plot(x=mytraining$Staffed.Rooms,y=mytraining$SchduleRoom,main="Staffed rooms vs schedule rooms ",xlab="Number of staffed rooms",ylab="Number of schedule rooms")
+
+set.seed(1)
+model_glmfeature <- train(Staffed.Rooms~ Number.Patients + SchduleRoom + Day_of_Week + Age_else + Age5to8 , data=mytraining, method="glm",metric=Metric, trControl=control)
+#final_glmfeat_model<-predict(model_glmfeature,mytesting)
+final_glmfeat<-predict(model_glmfeature, mytesting)
+result <- data.frame(cbind(mytesting$APT_DAY,final_glmfeat))
+result$final_glmfeat <- as.numeric(as.character(result$final_glmfeat))
+#final_ori_error<-sqrt(mean((final_glmfeat-mytesting$Staffed.Rooms)^2))
+#final_ori_error <- model_glmfeature$results$RMSE
+#final_error_feat<-sqrt(mean((final_glmfeat-oritesting$Staffed.Rooms)^2))
+#final_result <- c(final_ori_error, final_error_feat)
+##Since the rented room can not be fractional, I round up rented room.
+result$final_glmfeat <- round(result$final_glmfeat)
+result <- result[order(result$V1),]
+return(result)
+}
+```
+
+## 7.2 Predict staffed rooms under 45 percent missing value condition, then compare it to real staffed rooms  to see the percentage of prediction which difference is less than 1 room
+```{r, echo=FALSE, warning=FALSE}
+room_ci_45 <- Caculate_Staffed_room(real = "staffedrooms(ci_45).csv")
+room_lr_45 <- Caculate_Staffed_room(real = "staffedrooms(lr_45).csv")
+room_rt_45 <- Caculate_Staffed_room(real = "staffedrooms(rt_45).csv")
+room_del_45 <- Caculate_Staffed_room(real = "staffedrooms(del_45).csv")
+real_staffed_room <- read.csv("staffedrooms(ori).csv")
+real_staffed_room$APT_DAY<-unlist(lapply(as.character(real_staffed_room$Session),
+                        function(x){ paste(strsplit(x," ")[[1]][[1]],
+                                           strsplit(x," ")[[1]][[2]])
+  
+}))
+real_staffed_room_1 <- real_staffed_room[which(real_staffed_room$APT_DAY %in% room_ci_45$V1),]
+real_staffed_room_1 <- real_staffed_room_1[order(real_staffed_room_1$APT_DAY),]
+## difference in prediction under ci imputation methods
+diff_ci_45 <- real_staffed_room_1$Staffed.Rooms - room_ci_45$final_glmfeat
+#hist(diff_ci_45)
+library(plyr)
+library(ggplot2)
+counts <- count(diff_ci_45)
+counts$x <- as.factor(counts$x)
+ggplot(counts, aes(x = x, y = freq)) + 
+  geom_bar(fill = "#0073C2FF", stat = "identity") +
+  geom_text(aes(label = freq), vjust = -0.3) + geom_vline(xintercept= 5) + xlab("actual used - precdicted used") + ggtitle("Conditional Imputation")
+## difference in prediction under lr imputation methods
+diff_lr_45 <- real_staffed_room_1$Staffed.Rooms - room_lr_45$final_glmfeat
+counts_lr <- count(diff_lr_45)
+counts_lr$x <- as.factor(counts_lr$x)
+#counts_lr$label <- c("TowRoomsSurplus", "OneRoomSurplus","Equal", "OneRoomDefficent", "TwoRoomsDefficent", "ThreeRoomsDefficent")
+ggplot(counts_lr, aes(x = x, y = freq)) + 
+  geom_bar(fill = "#0073C2FF", stat = "identity") +
+  geom_text(aes(label = freq), vjust = -0.3) + geom_vline(xintercept= 5) + xlab("actual used - precdicted used") + ggtitle("Linear Regression")
+## difference in prediction under rt imputation methods
+diff_rt_45 <- real_staffed_room_1$Staffed.Rooms - room_rt_45$final_glmfeat
+counts_rt <- count(diff_rt_45)
+counts_rt$x <- as.factor(counts_rt$x)
+#counts_rt$label <- c("TowRoomsSurplus", "OneRoomSurplus","Equal", "OneRoomDefficent", "TwoRoomsDefficent", "ThreeRoomsDefficent")
+ggplot(counts_rt, aes(x = x, y = freq)) + 
+  geom_bar(fill = "#0073C2FF", stat = "identity") +
+  geom_text(aes(label = freq), vjust = -0.3) + geom_vline(xintercept= 5) + xlab("actual used - precdicted used") + ggtitle("Regression Tree")
+## difference in prediction under deleting missing value methods
+diff_del_45 <- real_staffed_room_1$Staffed.Rooms - room_del_45$final_glmfeat
+counts_del <- count(diff_del_45)
+counts_del$x <- as.factor(counts_del$x)
+ggplot(counts_del, aes(x = x, y = freq)) + 
+  geom_bar(fill = "#0073C2FF", stat = "identity") +
+  geom_text(aes(label = freq), vjust = -0.3) + geom_vline(xintercept= 2) + xlab("actual used - precdicted used") + ggtitle("Delete missing value")
+## schedule using appointment information
+appt_data <- read.csv(file.path(datadirectory, "aggregatedate(ori).csv"))
+appt_data <- appt_data[which(appt_data$APT_DAY %in% room_ci_45$V1),]
+appt_data_room <- appt_data$SchduleRoom
+diff_appt <- appt_data$Staffed.Rooms - appt_data$SchduleRoom
+counts_appt <- count(diff_appt)
+counts_appt$x <- as.factor(counts_appt$x)
+ggplot(counts_appt, aes(x = x, y = freq)) + 
+  geom_bar(fill = "#0073C2FF", stat = "identity") +
+  geom_text(aes(label = freq), vjust = -0.3) + geom_vline(xintercept= 5) + geom_vline(xintercept= 8) + xlab("actual used - precdicted used") + ggtitle("Schedule by appointment")
+
+## Here is an interesting thing: the predictions which are 2 or more rooms away from fact are the same day.
+## Maybe there're too many rows belongs to that day are missing.
+```
+
+- From graphs we can see that under situation where data set contains 45 percent of missing value, all the imputed dataset performs well in pretive models. Their performances are very similar, we can meet nearly 94 percent of the room demand if we add one more safty room and few of the differences between prediction and actuality is more than 2 rooms. Most of differences are within 1 room range(includng 1 room).
+
+- deleted date set performs very bad, that's because deleting means underestimating patients who come to hospital.
+
+- use appointment information to do prediction will highly overrate the room demands because it doesn't consider cancellations, no shows and arriving late. That's why we need to use predictive model to predict staffed rooms.
+
+## Show why data collected in 2016 cannot be used.
+```{r}
+data_2016 <-read_excel(file.path(datadirectory, "Neurology_FY16.xlsx"))
+nrow(data_2016[(is.na(data_2016$`Rooming Form`)& is.na(data_2016$`Depart Summary`)) |(!is.na(data_2016$`Rooming Form`) & is.na(data_2016$`Depart Summary`)),])/nrow(data_2016)
+# there're too many missing value to impute it and then use it as facts.
+```
+
+
